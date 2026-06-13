@@ -25,7 +25,14 @@ const path = require("path");
 const API_HOST = "sky.coflnet.com";
 const PREMIUM_PATH = "/api/flip/bazaar/spread/deemand"; // CoflNet's route is spelled "deemand"
 const FREE_PATH = "/api/flip/bazaar/spread";
-const CONFIG_PATH = path.join(__dirname, "cofl-sync.config.json");
+const CONFIG_PATH = (() => {
+  const names = ["cofl-sync.config.json", "coflsync.config.json"];
+  for (const n of names) {
+    const p = path.join(__dirname, n);
+    if (fs.existsSync(p)) return p;
+  }
+  return path.join(__dirname, "cofl-sync.config.json");
+})();
 const SIDECAR_PATH = path.join(__dirname, ".cofl-auto.json");
 
 const DEFAULTS = {
