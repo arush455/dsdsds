@@ -1,0 +1,74 @@
+{
+  "key": "9uZO3QWqV7j06FhJ.mbf.6e7e01e6f0231625cabf87f562a290d4",
+  "username": [
+    "_Arusch455_"
+  ],
+  "webhook": "https://discord.com/api/webhooks/1514423564478971914/QALKUCjYl-vOWXRB7QM8QyUtyEK3KnFDQpCWVtztRTyv_joqBze_cf7l2ZFaF_ppcuH6",
+  "detailedWebhooks": true,
+  "respectCoopOrders": true,
+  "friendlyKeys": "",
+  "clearOnStart": false,
+  "webpage": {
+    "settings": {
+      "port": 9090,
+      "password": "LOLO"
+    },
+    "colors": {
+      "accent": "#a78bfa",
+      "text": "#e9d5ff",
+      "inactiveBg": "#1e1b2e",
+      "inactiveText": "#c4b5fd",
+      "bgMain": "#0f0a1f",
+      "bgHeader": "#1a1333",
+      "bgTab": "#221845",
+      "bgPanel": "#130d26",
+      "border": "#6d28d9",
+      "chartLineUp": "#a78bfa",
+      "chartLineDown": "#6d28d9",
+      "chartUpFill": "rgba(167, 139, 250, 0.3)",
+      "chartDownFill": "rgba(109, 40, 217, 0.3)",
+      "auroraStart": "#6d28d9",
+      "auroraEnd": "#a78bfa",
+      "loginBg": "#1a1333",
+      "loginBox": "#1a1333",
+      "loginBorder": "#7c3aed",
+      "loginAccent": "#a78bfa",
+      "loginText": "#e9d5ff"
+    }
+  },
+  "profit": {
+    "min": 5000,
+    "max": 15000000,
+    "minPercentage": 3
+  },
+  "price": {
+    "maxPricePerUnitBuy": 120000000,
+    "maxPricePerUnitSell": 2000000000000,
+    "minPricePerUnitBuy": 100,
+    "manipulationTriggerPercentage": 5,
+    "temporaryBlacklistDuration": 120
+  },
+  "orders": {
+    "maxBuyOrders": 7,
+    "sortBy": "coinsPerHour",
+    "relistAfterType": "orderAmount",
+    "relistAfter": 4,
+    "relistWorthThreshold": 1000000
+  },
+  "volume": {
+    "minBuy": 1000,
+    "minSell": 1000
+  },
+  "purse": {
+    "minPurse": 5000000,
+    "maxSpentPerOrder": 80000000
+  },
+  "proxy": {
+    "enabled": true,
+    "ip": "154.7.187.91",
+    "port": 6567,
+    "username": "kbjinmkw",
+    "password": "9tnwdmsmnfoe"
+  },
+  "selectiveBuys": "both"
+}
