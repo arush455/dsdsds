@@ -84,7 +84,11 @@ function loadConfig() {
 function httpsGetJson(host, reqPath, token) {
   return new Promise((resolve, reject) => {
     const headers = { Accept: "application/json", "User-Agent": "cofl-sync/1.0" };
-    if (token) headers.Authorization = `Bearer ${token}`;
+    // CoflNet checks GoogleToken header first, then Authorization Bearer as fallback.
+    if (token) {
+      headers.GoogleToken = token;
+      headers.Authorization = `Bearer ${token}`;
+    }
     const req = https.request({ host, path: reqPath, method: "GET", headers, timeout: 30000 }, (res) => {
       let data = "";
       res.on("data", (c) => (data += c));
@@ -138,9 +142,13 @@ function normalize(entry) {
   const buyVolume = Number(pick(flip, ["buyVolume", "BuyVolume", "buyMovingWeek", "volume", "Volume"]) ?? 0);
   const sellVolume = Number(pick(flip, ["sellVolume", "SellVolume", "sellMovingWeek", "volume", "Volume"]) ?? 0);
   const explicitProfit = Number(pick(flip, ["profit", "Profit", "spread", "Spread"]) ?? NaN);
-  const profit = !Number.isNaN(explicitProfit) ? explicitProfit : sellPrice - buyPrice;
+  // Profit = absolute spread between the two prices regardless of which is labelled buy/sell.
+  const rawProfit = !Number.isNaN(explicitProfit) ? explicitProfit : Math.abs(sellPrice - buyPrice);
+  const profit = rawProfit;
   const isManipulated = Boolean(pick(entry, ["isManipulated", "IsManipulated"]) || pick(flip, ["isManipulated", "IsManipulated"]));
-  const percentage = buyPrice > 0 ? (profit / buyPrice) * 100 : 0;
+  // Base percentage on the lower of the two prices (the cost to enter the flip).
+  const costBasis = Math.min(buyPrice, sellPrice) || buyPrice || sellPrice;
+  const percentage = costBasis > 0 ? (profit / costBasis) * 100 : 0;
   return { tag, buyPrice, sellPrice, medianBuy, buyVolume, sellVolume, profit, percentage, isManipulated };
 }
 
