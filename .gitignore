@@ -1,0 +1,4 @@
+.cofl-auto.json
+cofl-sync.log
+*.tmp
+node_modules/
