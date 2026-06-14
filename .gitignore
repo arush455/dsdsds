@@ -1,5 +1,7 @@
 cofl-sync.config.json
 .cofl-auto.json
+.config.runtime.json
+config.json.bak
 cofl-sync.log
 *.tmp
 node_modules/
