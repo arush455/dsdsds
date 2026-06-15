@@ -209,19 +209,30 @@ function parseCoins(str) {
 
 function extractOrderValue(payload) {
   for (const embed of payload.embeds || []) {
-    const title = (embed.title || embed.description || "").toLowerCase();
-    const isBuy  = title.includes("buy order placed");
-    const isSell = title.includes("sell offer placed");
+    const rawTitle = embed.title || embed.description || "";
+    const title = rawTitle.toLowerCase();
+    // Log first embed title so we can verify format matches
+    if (rawTitle) log(`[webhook] embed title: "${rawTitle.slice(0, 120)}"`);
+
+    const isBuy  = title.includes("buy order") || title.includes("buy offer");
+    const isSell = title.includes("sell offer") || title.includes("sell order");
     if (!isBuy && !isSell) continue;
+
     for (const f of embed.fields || []) {
       const name = (f.name || "").toLowerCase();
-      if (name.includes("worth") || name.includes("value") || name.includes("amount")) {
+      log(`[webhook] field: "${f.name}" = "${(f.value || "").slice(0, 60)}"`);
+      if (name.includes("worth") || name.includes("value") || name.includes("amount") || name.includes("coin") || name.includes("price") || name.includes("total")) {
         const w = parseCoins(f.value);
         if (w > 0) return { type: isBuy ? "buy" : "sell", worth: w };
       }
     }
-    const m = (embed.description || "").match(/([\d.,]+\s*[KMBkmb]?\s*coins)/i);
+    // Fallback: scan description for any coin amount
+    const desc = embed.description || "";
+    const m = desc.match(/([\d.,]+\s*[KMBkmb]?)\s*coins/i);
     if (m) { const w = parseCoins(m[1]); if (w > 0) return { type: isBuy ? "buy" : "sell", worth: w }; }
+    // Last fallback: any large number in description (likely order value)
+    const m2 = desc.match(/([\d.,]{4,})/);
+    if (m2) { const w = parseCoins(m2[1]); if (w > 50000) return { type: isBuy ? "buy" : "sell", worth: w }; }
   }
   return { type: null, worth: 0 };
 }
