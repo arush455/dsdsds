@@ -54,7 +54,16 @@ let CFG = {
 };
 try { CFG = { ...CFG, ...JSON.parse(fs.readFileSync(CFG_PATH, "utf8")) }; } catch { /* defaults */ }
 
-const LIMIT = CFG.dailyLimitCoins;
+// Effective per-account cap. Supports a one-day override (limitOverrideDate /
+// limitOverrideCoins): on the matching UTC date the override is used, otherwise
+// it automatically falls back to dailyLimitCoins. LIMIT is recomputed at each
+// midnight reset so a "today only" cap reverts on its own.
+function effectiveLimit() {
+  const today = new Date().toISOString().slice(0, 10);
+  if (CFG.limitOverrideDate === today && CFG.limitOverrideCoins) return CFG.limitOverrideCoins;
+  return CFG.dailyLimitCoins;
+}
+let LIMIT = effectiveLimit();
 const PORT  = CFG.proxyPort;
 
 function log(msg) { console.log(`[guard ${new Date().toISOString()}] ${msg}`); }
@@ -310,7 +319,8 @@ function scheduleReset() {
   const next = new Date(); next.setUTCHours(24, 0, 0, 0);
   setTimeout(() => {
     STATE = freshState(); saveState();
-    log("Daily limits reset (00:00 UTC).");
+    LIMIT = effectiveLimit(); // re-evaluate any one-day override (reverts when the date passes)
+    log(`Daily limits reset (00:00 UTC). Per-account cap now ${fmt(LIMIT)}.`);
     notifyDiscord("🔄 Daily limits reset. Resuming flipping.");
     if (!child) startNextAccount(); // resume if we were idle
     scheduleReset();
