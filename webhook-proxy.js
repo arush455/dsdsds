@@ -54,16 +54,16 @@ let CFG = {
 };
 try { CFG = { ...CFG, ...JSON.parse(fs.readFileSync(CFG_PATH, "utf8")) }; } catch { /* defaults */ }
 
-// Effective per-account cap. Supports a one-day override (limitOverrideDate /
-// limitOverrideCoins): on the matching UTC date the override is used, otherwise
-// it automatically falls back to dailyLimitCoins. LIMIT is recomputed at each
-// midnight reset so a "today only" cap reverts on its own.
-function effectiveLimit() {
-  const today = new Date().toISOString().slice(0, 10);
-  if (CFG.limitOverrideDate === today && CFG.limitOverrideCoins) return CFG.limitOverrideCoins;
+// Returns the cap for a specific account. Checks accountLimits map first,
+// then falls back to the global dailyLimitCoins.
+function limitFor(username) {
+  if (CFG.accountLimits && CFG.accountLimits[username] !== undefined) {
+    return CFG.accountLimits[username];
+  }
   return CFG.dailyLimitCoins;
 }
-let LIMIT = effectiveLimit();
+// Keep LIMIT as the global default (used for status embed header).
+let LIMIT = CFG.dailyLimitCoins;
 const PORT  = CFG.proxyPort;
 
 function log(msg) { console.log(`[guard ${new Date().toISOString()}] ${msg}`); }
@@ -156,7 +156,7 @@ function spawnBotFor(username) {
 
   const a = acc(username);
   const label = username === "__ALL__" ? "all accounts" : username;
-  log(`▶ Launching mbf-linux for ${label} (today: buy ${fmt(a.buy)}, sell ${fmt(a.sell)} / cap ${fmt(LIMIT)})`);
+  log(`▶ Launching mbf-linux for ${label} (today: buy ${fmt(a.buy)}, sell ${fmt(a.sell)} / cap ${fmt(limitFor(username))})`);
 
   child = spawn(MBF_BIN, [], { stdio: "inherit", cwd: __dirname });
 
@@ -254,8 +254,9 @@ function recordOrder(type, worth) {
   saveState();
   const label = currentAccount === "__ALL__" ? "ALL" : currentAccount;
   const total = a.buy + a.sell;
-  log(`${type === "buy" ? "Buy " : "Sell"} ${fmt(worth)} | ${label}: total ${fmt(total)} (buy ${fmt(a.buy)} + sell ${fmt(a.sell)}) / cap ${fmt(LIMIT)}`);
-  if (total >= LIMIT) {
+  const cap = limitFor(currentAccount);
+  log(`${type === "buy" ? "Buy " : "Sell"} ${fmt(worth)} | ${label}: total ${fmt(total)} (buy ${fmt(a.buy)} + sell ${fmt(a.sell)}) / cap ${fmt(cap)}`);
+  if (total >= cap) {
     capCurrentAndRotate(`total ${fmt(total)} = buy ${fmt(a.buy)} + sell ${fmt(a.sell)}`);
   }
 }
@@ -289,13 +290,14 @@ function buildStatusEmbed() {
   const fields = rotation.map(u => {
     const a = acc(u);
     const total = a.buy + a.sell;
-    const tp = LIMIT ? (total / LIMIT) * 100 : 0;
+    const acap = limitFor(u);
+    const tp = acap ? (total / acap) * 100 : 0;
     const label = u === "__ALL__" ? "All accounts" : u;
     const tag = (u === currentAccount && child) ? " 🟢 active" : (a.done ? " ✅ capped" : "");
     return {
       name: `${label}${tag}`,
       value:
-        `\`${bar(tp)}\` **${fmt(total)} / ${fmt(LIMIT)}** (${tp.toFixed(0)}%)\n` +
+        `\`${bar(tp)}\` **${fmt(total)} / ${fmt(acap)}** (${tp.toFixed(0)}%)\n` +
         `└ buy ${fmt(a.buy)} · sell ${fmt(a.sell)}`,
     };
   });
@@ -319,8 +321,7 @@ function scheduleReset() {
   const next = new Date(); next.setUTCHours(24, 0, 0, 0);
   setTimeout(() => {
     STATE = freshState(); saveState();
-    LIMIT = effectiveLimit(); // re-evaluate any one-day override (reverts when the date passes)
-    log(`Daily limits reset (00:00 UTC). Per-account cap now ${fmt(LIMIT)}.`);
+    log(`Daily limits reset (00:00 UTC).`);
     notifyDiscord("🔄 Daily limits reset. Resuming flipping.");
     if (!child) startNextAccount(); // resume if we were idle
     scheduleReset();
