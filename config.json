@@ -13,7 +13,7 @@
   "webpage": {
     "settings": {
       "port": 9090,
-      "password": "LOLO"
+      "password": "1111"
     },
     "colors": {
       "accent": "#a78bfa",
@@ -69,8 +69,8 @@
     "enabled": true,
     "ip": ["154.7.187.91", "193.160.236.149"],
     "port": [6567, 5171],
-    "username": ["kbjinmkw", "kbjinmkw"],
-    "password": ["9tnwdmsmnfoe", "9tnwdmsmnfoe"]
+    "username": "kbjinmkw",
+    "password": "9tnwdmsmnfoe"
   },
   "selectiveBuys": "both"
 }
