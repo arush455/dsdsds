@@ -50,6 +50,7 @@ let CFG = {
   realWebhook:     "",
   statePath:       path.join(__dirname, ".proxy-state.json"),
   restartCrashedAfterSec: 10,
+  statusIntervalMinutes: 30,   // how often to post the daily-limit status webhook (0 = off)
 };
 try { CFG = { ...CFG, ...JSON.parse(fs.readFileSync(CFG_PATH, "utf8")) }; } catch { /* defaults */ }
 
@@ -191,6 +192,7 @@ function capCurrentAndRotate(reason) {
   const label = u === "__ALL__" ? "Bot" : u;
   log(`🧯 ${label} reached cap (${reason}). ${perAccountMode ? "Switching account." : "Stopping."}`);
   notifyDiscord(`🧯 **${label}** hit the ${fmt(LIMIT)} cap (${reason}).${perAccountMode ? " Switching to the next account." : " Stopping until 00:00 UTC."}`);
+  postStatus();
   killBotForRotation();
 }
 
@@ -255,6 +257,41 @@ function forwardToDiscord(payload) {
 }
 function notifyDiscord(content) { forwardToDiscord({ content }).catch(() => {}); }
 
+// ── Daily-limit status webhook ────────────────────────────────────────────────
+
+function bar(pct) {
+  const filled = Math.max(0, Math.min(10, Math.round(pct / 10)));
+  return "▰".repeat(filled) + "▱".repeat(10 - filled);
+}
+
+function buildStatusEmbed() {
+  const fields = rotation.map(u => {
+    const a = acc(u);
+    const bp = LIMIT ? (a.buy / LIMIT) * 100 : 0;
+    const sp = LIMIT ? (a.sell / LIMIT) * 100 : 0;
+    const label = u === "__ALL__" ? "All accounts" : u;
+    const tag = (u === currentAccount && child) ? " 🟢 active" : (a.done ? " ✅ capped" : "");
+    return {
+      name: `${label}${tag}`,
+      value:
+        `Buy  \`${bar(bp)}\` ${fmt(a.buy)} / ${fmt(LIMIT)} (${bp.toFixed(0)}%)\n` +
+        `Sell \`${bar(sp)}\` ${fmt(a.sell)} / ${fmt(LIMIT)} (${sp.toFixed(0)}%)`,
+    };
+  });
+  return {
+    title: "📊 MBF Daily Limit Status",
+    description: `Per-account cap **${fmt(LIMIT)}** (buy & sell each) · resets 00:00 UTC`,
+    color: 0xa78bfa,
+    fields,
+    footer: { text: child ? `Active: ${currentAccount}` : "Idle (all capped / waiting)" },
+    timestamp: new Date().toISOString(),
+  };
+}
+
+function postStatus() {
+  if (CFG.realWebhook) forwardToDiscord({ embeds: [buildStatusEmbed()] }).catch(() => {});
+}
+
 // ── Midnight reset ────────────────────────────────────────────────────────────
 
 function scheduleReset() {
@@ -305,5 +342,13 @@ server.listen(PORT, "127.0.0.1", () => {
   if (allDone) { log("All accounts already capped for today. Idling until 00:00 UTC."); restoreMaster(); }
   else startNextAccount();
   scheduleReset();
+
+  // Periodic daily-limit status webhook (plus one shortly after startup).
+  const statusMin = CFG.statusIntervalMinutes;
+  if (statusMin > 0 && CFG.realWebhook) {
+    setTimeout(postStatus, 20000);
+    setInterval(postStatus, statusMin * 60 * 1000);
+    log(`Status webhook every ${statusMin} min.`);
+  }
 });
 server.on("error", (e) => { log(`Server error: ${e.message}`); process.exit(1); });
