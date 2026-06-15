@@ -164,24 +164,17 @@ function buildWhitelistEntry(item, t) {
 
 function buildSelectiveEntry(item, t) {
   const p = item.buyPrice;
-  let relistAfter, maxBuyAmount;
-  if (p > 5_000_000) {
-    relistAfter = 16;
-    maxBuyAmount = 1;
-  } else if (p > 1_000_000) {
-    relistAfter = 32;
-    maxBuyAmount = 5;
-  } else if (p > 100_000) {
-    relistAfter = 256;
-    maxBuyAmount = 64;
-  } else {
-    relistAfter = 1024;
-    maxBuyAmount = 2048;
-  }
+  // maxBuyAmount scales by price (smaller stacks for expensive items).
+  let maxBuyAmount;
+  if (p > 5_000_000) maxBuyAmount = 1;
+  else if (p > 1_000_000) maxBuyAmount = 5;
+  else if (p > 100_000) maxBuyAmount = 64;
+  else maxBuyAmount = 2048;
   return {
     ...buildWhitelistEntry(item, t),
-    relistAfterType: "itemAmount",
-    relistAfter,
+    // Relist only when pushed out of the top 5 orders (let orders sit and fill).
+    relistAfterType: "orderAmount",
+    relistAfter: 5,
     maxBuyAmount,
     manipulationTriggerPercentage: 2,
     relistWorthThreshold: Math.max(250000, Math.round(p * 5)),
