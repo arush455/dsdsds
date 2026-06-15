@@ -41,7 +41,7 @@
   "profit": {
     "min": 80000,
     "max": 15000000,
-    "minPercentage": 3.0
+    "minPercentage": 4.0
   },
   "price": {
     "maxPricePerUnitBuy": 120000000,
