@@ -23,7 +23,16 @@ const https = require("https");
 const fs    = require("fs");
 const path  = require("path");
 const { spawn } = require("child_process");
-const { buildRuntimeConfig } = require("./lib-mbf.js");
+
+// Accept either filename (with or without the dash) for the shared module.
+const _libPath = ["lib-mbf.js", "libmbf.js"]
+  .map(n => path.join(__dirname, n))
+  .find(p => fs.existsSync(p));
+if (!_libPath) {
+  console.error("[guard] Missing lib-mbf.js (or libmbf.js) — upload it next to this file.");
+  process.exit(1);
+}
+const { buildRuntimeConfig } = require(_libPath);
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
