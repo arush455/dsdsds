@@ -110,6 +110,10 @@ const backup = CONFIG_PATH + ".bak";
 fs.copyFileSync(CONFIG_PATH, backup);
 fs.copyFileSync(RUNTIME_PATH, CONFIG_PATH);
 
+// Route webhooks through the local proxy so the limit guard sees every order.
+runtime.webhook = "http://127.0.0.1:8765";
+log(`Webhooks routed through limit-guard proxy on :8765`);
+
 log(`Launching mbf-linux...`);
 
 let exitCode = 0;
