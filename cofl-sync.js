@@ -244,17 +244,22 @@ async function runOnce(cfg) {
   const cph = (i) => (!Number.isNaN(i.profitPerHour) ? i.profitPerHour : i.profit * i.volume);
   const minCph = typeof t.minProfitPerHour === "number" ? t.minProfitPerHour : 1_000_000;
 
-  const candidates = raw
-    .map(normalize)
-    .filter((i) => i.tag)
-    .filter((i) => !blacklist.has(i.tag))
-    .filter((i) => !manualKeys.has(i.tag))
-    .filter((i) => !(t.skipManipulated && i.isManipulated))
-    .filter((i) => i.profit >= t.minProfit)            // small per-flip floor
-    .filter((i) => i.percentage >= t.minPercentage)    // margin %
-    .filter((i) => cph(i) >= minCph)                   // realistic coins/hour
-    .filter((i) => i.buyPrice > 0 && i.buyPrice <= t.maxPrice)
-    .filter((i) => i.volume >= t.minVolume)            // single volume field (premium)
+  // Funnel diagnostics: count how many items survive each filter stage.
+  const funnel = {};
+  const stage = (name, arr, pred) => { const out = arr.filter(pred); funnel[name] = `${out.length}/${arr.length}`; return out; };
+
+  let pool = raw.map(normalize).filter((i) => i.tag);
+  pool = stage("not-blacklisted", pool, (i) => !blacklist.has(i.tag));
+  pool = stage("not-manual",      pool, (i) => !manualKeys.has(i.tag));
+  pool = stage("not-manipulated", pool, (i) => !(t.skipManipulated && i.isManipulated));
+  pool = stage("minProfit",       pool, (i) => i.profit >= t.minProfit);
+  pool = stage("minPercentage",   pool, (i) => i.percentage >= t.minPercentage);
+  pool = stage("minProfitPerHour",pool, (i) => cph(i) >= minCph);
+  pool = stage("maxPrice",        pool, (i) => i.buyPrice > 0 && i.buyPrice <= t.maxPrice);
+  pool = stage("minVolume",       pool, (i) => i.volume >= t.minVolume);
+  log(`Filter funnel (survivors/input): ${Object.entries(funnel).map(([k, v]) => `${k} ${v}`).join(" | ")}`);
+
+  const candidates = pool
     // Rank by coins/hour — exactly the metric you care about.
     .sort((a, b) => cph(b) - cph(a))
     .slice(0, cfg.maxAutoItems);
