@@ -233,9 +233,10 @@ function recordOrder(type, worth) {
   if (type === "buy") a.buy += worth; else a.sell += worth;
   saveState();
   const label = currentAccount === "__ALL__" ? "ALL" : currentAccount;
-  log(`${type === "buy" ? "Buy " : "Sell"} ${fmt(worth)} | ${label}: buy ${fmt(a.buy)} / sell ${fmt(a.sell)} (cap ${fmt(LIMIT)})`);
-  if (a.buy >= LIMIT || a.sell >= LIMIT) {
-    capCurrentAndRotate(a.buy >= LIMIT ? `buy ${fmt(a.buy)}` : `sell ${fmt(a.sell)}`);
+  const total = a.buy + a.sell;
+  log(`${type === "buy" ? "Buy " : "Sell"} ${fmt(worth)} | ${label}: total ${fmt(total)} (buy ${fmt(a.buy)} + sell ${fmt(a.sell)}) / cap ${fmt(LIMIT)}`);
+  if (total >= LIMIT) {
+    capCurrentAndRotate(`total ${fmt(total)} = buy ${fmt(a.buy)} + sell ${fmt(a.sell)}`);
   }
 }
 
@@ -267,20 +268,20 @@ function bar(pct) {
 function buildStatusEmbed() {
   const fields = rotation.map(u => {
     const a = acc(u);
-    const bp = LIMIT ? (a.buy / LIMIT) * 100 : 0;
-    const sp = LIMIT ? (a.sell / LIMIT) * 100 : 0;
+    const total = a.buy + a.sell;
+    const tp = LIMIT ? (total / LIMIT) * 100 : 0;
     const label = u === "__ALL__" ? "All accounts" : u;
     const tag = (u === currentAccount && child) ? " 🟢 active" : (a.done ? " ✅ capped" : "");
     return {
       name: `${label}${tag}`,
       value:
-        `Buy  \`${bar(bp)}\` ${fmt(a.buy)} / ${fmt(LIMIT)} (${bp.toFixed(0)}%)\n` +
-        `Sell \`${bar(sp)}\` ${fmt(a.sell)} / ${fmt(LIMIT)} (${sp.toFixed(0)}%)`,
+        `\`${bar(tp)}\` **${fmt(total)} / ${fmt(LIMIT)}** (${tp.toFixed(0)}%)\n` +
+        `└ buy ${fmt(a.buy)} · sell ${fmt(a.sell)}`,
     };
   });
   return {
     title: "📊 MBF Daily Limit Status",
-    description: `Per-account cap **${fmt(LIMIT)}** (buy & sell each) · resets 00:00 UTC`,
+    description: `Per-account cap **${fmt(LIMIT)}** (buy + sell combined) · resets 00:00 UTC`,
     color: 0xa78bfa,
     fields,
     footer: { text: child ? `Active: ${currentAccount}` : "Idle (all capped / waiting)" },
