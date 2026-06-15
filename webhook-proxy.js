@@ -21,11 +21,15 @@ const path  = require("path");
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-const CFG_PATH = path.join(__dirname, "webhook-proxy.config.json");
+// Accept either filename (with or without dash) to match however you saved it.
+const CFG_PATH = ["webhook-proxy.config.json", "webhookproxy.config.json"]
+  .map(n => path.join(__dirname, n))
+  .find(p => fs.existsSync(p)) || path.join(__dirname, "webhook-proxy.config.json");
+
 let CFG = {
   proxyPort:       8765,
   dailyLimitCoins: 13_000_000_000,   // stop the bot at 13B (2B spare)
-  realWebhook:     "",               // filled from config.json automatically
+  realWebhook:     "",               // your real Discord webhook (set here, see below)
   statePath:       path.join(__dirname, ".proxy-state.json"),
 };
 
@@ -34,13 +38,20 @@ try {
   CFG = { ...CFG, ...file };
 } catch { /* use defaults */ }
 
-// Pull the real Discord webhook from config.json if not overridden
-if (!CFG.realWebhook) {
+function isLoopback(url) {
+  return /(^https?:\/\/)?(127\.0\.0\.1|localhost)(:|\/|$)/i.test(url || "");
+}
+
+// Pull the real Discord webhook from config.json ONLY if not set in the proxy config.
+// start.js swaps config.json's webhook to localhost while running, so we ignore loopback URLs
+// to avoid the proxy forwarding to itself in a loop.
+if (!CFG.realWebhook || isLoopback(CFG.realWebhook)) {
   try {
     const bot = JSON.parse(fs.readFileSync(path.join(__dirname, "config.json"), "utf8"));
-    CFG.realWebhook = bot.webhook || "";
+    if (bot.webhook && !isLoopback(bot.webhook)) CFG.realWebhook = bot.webhook;
   } catch { /* ignore */ }
 }
+if (isLoopback(CFG.realWebhook)) CFG.realWebhook = ""; // never forward to ourselves
 
 // ── State (persisted so a proxy restart doesn't reset the counter) ────────────
 

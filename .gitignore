@@ -1,6 +1,9 @@
 cofl-sync.config.json
+webhook-proxy.config.json
+webhookproxy.config.json
 .cofl-auto.json
 .config.runtime.json
+.proxy-state.json
 config.json.bak
 cofl-sync.log
 *.tmp
