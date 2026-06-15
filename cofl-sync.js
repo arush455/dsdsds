@@ -45,13 +45,13 @@ const DEFAULTS = {
   addToSelectiveBuys: true,
   webhook: "",
   thresholds: {
-    minProfit: 5000,
-    minPercentage: 3,
+    minProfit: 1000,          // small per-flip spread floor (bazaar flips are tiny per unit)
+    minPercentage: 3,         // margin %
+    minProfitPerHour: 1000000, // realistic coins/hour per item (premium metric)
     minVolume: 1000,
     maxPrice: 120000000,
     skipManipulated: true,
-    minBalanceRatio: 0.25, // slower side must be >=25% of the faster side (avoids one-sided pile-ups)
-    relistAfter: 3,        // relist auto items only when pushed past Nth order
+    relistAfter: 3,           // relist auto items only when pushed past Nth order
   },
 };
 
@@ -141,19 +141,18 @@ function normalize(entry) {
   const tag = pick(flip, ["itemTag", "ItemTag", "productId", "tag"]) || pick(entry, ["itemTag", "tag"]);
   const buyPrice = Number(pick(flip, ["buyPrice", "BuyPrice", "buy"]) ?? 0);
   const sellPrice = Number(pick(flip, ["sellPrice", "SellPrice", "sell"]) ?? 0);
-  const medianBuy = Number(pick(flip, ["medianBuyPrice", "MedianBuyPrice"]) ?? 0);
-  // Volumes can appear under several names depending on endpoint.
-  const buyVolume = Number(pick(flip, ["buyVolume", "BuyVolume", "buyMovingWeek", "volume", "Volume"]) ?? 0);
-  const sellVolume = Number(pick(flip, ["sellVolume", "SellVolume", "sellMovingWeek", "volume", "Volume"]) ?? 0);
+  const medianValue = Number(pick(flip, ["medianValue", "MedianValue", "medianBuyPrice", "MedianBuyPrice"]) ?? 0);
+  // Premium endpoint exposes a single "volume" plus a precomputed coins/hour figure.
+  const volume = Number(pick(flip, ["volume", "Volume", "buyVolume", "buyMovingWeek"]) ?? 0);
+  const profitPerHour = Number(pick(flip, ["currentProfitPerHour", "CurrentProfitPerHour", "profitPerHour"]) ?? NaN);
   const explicitProfit = Number(pick(flip, ["profit", "Profit", "spread", "Spread"]) ?? NaN);
-  // Profit = absolute spread between the two prices regardless of which is labelled buy/sell.
-  const rawProfit = !Number.isNaN(explicitProfit) ? explicitProfit : Math.abs(sellPrice - buyPrice);
-  const profit = rawProfit;
+  // Per-flip profit = spread between sell and buy (the margin you capture once).
+  const profit = !Number.isNaN(explicitProfit) ? explicitProfit : Math.abs(sellPrice - buyPrice);
   const isManipulated = Boolean(pick(entry, ["isManipulated", "IsManipulated"]) || pick(flip, ["isManipulated", "IsManipulated"]));
-  // Base percentage on the lower of the two prices (the cost to enter the flip).
+  // Percentage margin on the cost to enter the flip.
   const costBasis = Math.min(buyPrice, sellPrice) || buyPrice || sellPrice;
   const percentage = costBasis > 0 ? (profit / costBasis) * 100 : 0;
-  return { tag, buyPrice, sellPrice, medianBuy, buyVolume, sellVolume, profit, percentage, isManipulated };
+  return { tag, buyPrice, sellPrice, medianValue, volume, profit, profitPerHour, percentage, isManipulated };
 }
 
 function buildWhitelistEntry(item, t) {
@@ -240,17 +239,10 @@ async function runOnce(cfg) {
   }
 
   const t = cfg.thresholds;
-  // Effective throughput of a flip is limited by the SLOWER side. An item with
-  // 1M buy volume but 2k sell volume will pile up unsold — rank by the min of the
-  // two sides so we favour items that actually cycle both ways.
-  const throughput = (i) => Math.min(i.buyVolume, i.sellVolume);
-  // Balance ratio: how lopsided the two sides are. 1.0 = perfectly balanced.
-  const balance = (i) => {
-    const hi = Math.max(i.buyVolume, i.sellVolume);
-    const lo = Math.min(i.buyVolume, i.sellVolume);
-    return hi > 0 ? lo / hi : 0;
-  };
-  const minBalance = typeof t.minBalanceRatio === "number" ? t.minBalanceRatio : 0.25;
+  // Premium gives currentProfitPerHour (coins/hour) directly — the best ranking signal.
+  // Fall back to per-flip profit × volume when it's absent (free endpoint).
+  const cph = (i) => (!Number.isNaN(i.profitPerHour) ? i.profitPerHour : i.profit * i.volume);
+  const minCph = typeof t.minProfitPerHour === "number" ? t.minProfitPerHour : 1_000_000;
 
   const candidates = raw
     .map(normalize)
@@ -258,14 +250,13 @@ async function runOnce(cfg) {
     .filter((i) => !blacklist.has(i.tag))
     .filter((i) => !manualKeys.has(i.tag))
     .filter((i) => !(t.skipManipulated && i.isManipulated))
-    .filter((i) => i.profit >= t.minProfit)
-    .filter((i) => i.percentage >= t.minPercentage)
+    .filter((i) => i.profit >= t.minProfit)            // small per-flip floor
+    .filter((i) => i.percentage >= t.minPercentage)    // margin %
+    .filter((i) => cph(i) >= minCph)                   // realistic coins/hour
     .filter((i) => i.buyPrice > 0 && i.buyPrice <= t.maxPrice)
-    .filter((i) => i.buyVolume >= t.minVolume && i.sellVolume >= t.minVolume)
-    // Drop one-sided items: if sells are <25% of buys (or vice versa) it won't cycle.
-    .filter((i) => balance(i) >= minBalance)
-    // Rank by realistic coins/hour: per-flip profit × throughput of the slower side.
-    .sort((a, b) => b.profit * throughput(b) - a.profit * throughput(a))
+    .filter((i) => i.volume >= t.minVolume)            // single volume field (premium)
+    // Rank by coins/hour — exactly the metric you care about.
+    .sort((a, b) => cph(b) - cph(a))
     .slice(0, cfg.maxAutoItems);
 
   const newAuto = [];
