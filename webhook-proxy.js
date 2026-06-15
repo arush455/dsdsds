@@ -107,6 +107,10 @@ const perAccountMode = Array.isArray(masterConfig.accounts);
 const rotation = perAccountMode
   ? masterConfig.accounts.filter(a => a.enabled !== false).map(a => a.username)
   : ["__ALL__"];
+// All accounts (incl. disabled) — used for the status webhook so disabled ones show "skipped".
+const allAccounts = perAccountMode
+  ? masterConfig.accounts.map(a => ({ username: a.username, enabled: a.enabled !== false }))
+  : [{ username: "__ALL__", enabled: true }];
 
 if (rotation.length === 0) { log("No enabled accounts in config.json. Enable at least one."); process.exit(1); }
 
@@ -287,12 +291,16 @@ function bar(pct) {
 }
 
 function buildStatusEmbed() {
-  const fields = rotation.map(u => {
+  const fields = allAccounts.map(({ username: u, enabled }) => {
+    const label = u === "__ALL__" ? "All accounts" : u;
+    // Disabled accounts: show as skipped, no progress bar.
+    if (!enabled) {
+      return { name: `${label} ⏭️ skipped`, value: "_disabled in config_" };
+    }
     const a = acc(u);
     const total = a.buy + a.sell;
     const acap = limitFor(u);
     const tp = acap ? (total / acap) * 100 : 0;
-    const label = u === "__ALL__" ? "All accounts" : u;
     const tag = (u === currentAccount && child) ? " 🟢 active" : (a.done ? " ✅ capped" : "");
     return {
       name: `${label}${tag}`,
