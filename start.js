@@ -23,7 +23,7 @@
 
 const fs   = require("fs");
 const path = require("path");
-const { spawnSync } = require("child_process");
+const { spawn } = require("child_process");
 
 const CONFIG_PATH  = path.join(__dirname, "config.json");
 const RUNTIME_PATH = path.join(__dirname, ".config.runtime.json");
@@ -96,6 +96,15 @@ try {
 
 const runtime = buildRuntimeConfig(cfg);
 
+// Route the bot's webhook through the local limit-guard proxy so it sees every order.
+// Must happen BEFORE the runtime config is written to disk. Set routeWebhookThroughGuard:false
+// in config.json to disable (then webhooks go straight to Discord and the limit guard is bypassed).
+const routeWebhook = cfg.routeWebhookThroughGuard !== false;
+const guardPort    = cfg.guardPort || 8765;
+if (routeWebhook && runtime.webhook) {
+  runtime.webhook = `http://127.0.0.1:${guardPort}`;
+}
+
 if (DRY) {
   log("Dry run — runtime config that would be passed to mbf-linux:");
   console.log(JSON.stringify(runtime, null, 2));
@@ -110,25 +119,45 @@ const backup = CONFIG_PATH + ".bak";
 fs.copyFileSync(CONFIG_PATH, backup);
 fs.copyFileSync(RUNTIME_PATH, CONFIG_PATH);
 
-// Route webhooks through the local proxy so the limit guard sees every order.
-runtime.webhook = "http://127.0.0.1:8765";
-log(`Webhooks routed through limit-guard proxy on :8765`);
-
+if (routeWebhook) log(`Webhooks routed through limit-guard proxy on :${guardPort}`);
 log(`Launching mbf-linux...`);
 
-let exitCode = 0;
-try {
-  const result = spawnSync(MBF_BIN, [], { stdio: "inherit" });
-  exitCode = result.status ?? 0;
-} finally {
-  // Always restore the real config, even if the bot crashes.
+// Restore the editable config exactly once, no matter how we exit.
+let restored = false;
+function restoreConfig() {
+  if (restored) return;
+  restored = true;
   try {
     fs.copyFileSync(backup, CONFIG_PATH);
     fs.unlinkSync(backup);
   } catch {
-    log("Warning: could not restore config.json — manually copy config.json.bak back.");
+    log("Warning: could not restore config.json — manually run: cp config.json.bak config.json");
   }
   try { fs.unlinkSync(RUNTIME_PATH); } catch { /* already gone */ }
 }
 
-process.exit(exitCode);
+// Launch the bot asynchronously with the real terminal attached (interactive TUI works,
+// unlike the old blocking spawnSync which froze on Ctrl+C).
+const child = spawn(MBF_BIN, [], { stdio: "inherit", cwd: __dirname });
+
+child.on("error", (err) => {
+  log(`Failed to launch mbf-linux: ${err.message}`);
+  restoreConfig();
+  process.exit(1);
+});
+
+child.on("exit", (code, signal) => {
+  restoreConfig();
+  if (signal) log(`mbf-linux stopped (${signal}). Config restored.`);
+  process.exit(code ?? 0);
+});
+
+// Forward Ctrl+C / kill to the bot, then let its exit handler restore + quit cleanly.
+for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  process.on(sig, () => {
+    if (child && !child.killed) child.kill(sig);
+  });
+}
+
+// Last-resort safety net: restore synchronously if Node exits for any other reason.
+process.on("exit", restoreConfig);
