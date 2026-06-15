@@ -319,7 +319,22 @@ function buildStatusEmbed() {
   };
 }
 
+function logStatus() {
+  log("─── Daily limit status ───");
+  for (const { username: u, enabled } of allAccounts) {
+    const label = u === "__ALL__" ? "All accounts" : u;
+    if (!enabled) { log(`  • ${label}: ⏭️  SKIPPED (disabled in config)`); continue; }
+    const a = acc(u);
+    const total = a.buy + a.sell;
+    const acap = limitFor(u);
+    const pct = acap ? ((total / acap) * 100).toFixed(0) : 0;
+    const tag = (u === currentAccount && child) ? "🟢 active" : (a.done ? "✅ capped" : "idle");
+    log(`  • ${label}: ${tag} | ${fmt(total)} / ${fmt(acap)} (${pct}%) | buy ${fmt(a.buy)} + sell ${fmt(a.sell)}`);
+  }
+}
+
 function postStatus() {
+  logStatus();
   if (CFG.realWebhook) forwardToDiscord({ embeds: [buildStatusEmbed()] }).catch(() => {});
 }
 
@@ -366,8 +381,15 @@ process.on("exit", () => { if (!child) restoreMaster(); });
 // ── Go ──────────────────────────────────────────────────────────────────────
 
 server.listen(PORT, "127.0.0.1", () => {
-  log(`Limit guard on http://127.0.0.1:${PORT} | per-account cap ${fmt(LIMIT)} | mode: ${perAccountMode ? "per-account rotation" : "single/global"}`);
+  log(`Limit guard on http://127.0.0.1:${PORT} | mode: ${perAccountMode ? "per-account rotation" : "single/global"}`);
   log(`Rotation order: ${rotation.join(" -> ")}`);
+  // Per-account overview in the terminal (incl. skipped/disabled accounts).
+  for (const { username: u, enabled } of allAccounts) {
+    const label = u === "__ALL__" ? "All accounts" : u;
+    if (!enabled) { log(`  • ${label}: ⏭️  SKIPPED (disabled in config)`); continue; }
+    const a = acc(u);
+    log(`  • ${label}: cap ${fmt(limitFor(u))} | today buy ${fmt(a.buy)} + sell ${fmt(a.sell)}${a.done ? " | ✅ capped" : ""}`);
+  }
   if (!CFG.realWebhook) log("Warning: no Discord webhook found — order webhooks won't be forwarded.");
   const allDone = rotation.every(u => acc(u).done);
   if (allDone) { log("All accounts already capped for today. Idling until 00:00 UTC."); restoreMaster(); }
