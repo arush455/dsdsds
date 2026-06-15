@@ -314,28 +314,6 @@
     "SHARD_MEGALITH"
   ],
   "whitelist": {
-    "ENCHANTED_SNOW_BLOCK": {
-      "maxPrice": 750,
-      "minProfit": 15,
-      "minPercentage": 3,
-      "minBuyOrder": 150,
-      "maxBuyOrder": 2500,
-      "minSellOffer": 150,
-      "maxSellOffer": 3500,
-      "minBuyVolume": 60000,
-      "minSellVolume": 60000
-    },
-    "ENCHANTED_BREAD": {
-      "maxPrice": 950,
-      "minProfit": 25,
-      "minPercentage": 3,
-      "minBuyOrder": 150,
-      "maxBuyOrder": 50000,
-      "minSellOffer": 150,
-      "maxSellOffer": 50000,
-      "minBuyVolume": 15000,
-      "minSellVolume": 15000
-    },
     "ENCHANTED_FERMENTED_SPIDER_EYE": {
       "maxPrice": 105000,
       "minProfit": 2000,
@@ -349,38 +327,6 @@
     }
   },
   "selectiveBuys": {
-    "ENCHANTED_SNOW_BLOCK": {
-      "maxPrice": 750,
-      "minProfit": 15,
-      "minPercentage": 3,
-      "minBuyOrder": 150,
-      "maxBuyOrder": 2500,
-      "minSellOffer": 150,
-      "maxSellOffer": 3500,
-      "minBuyVolume": 60000,
-      "minSellVolume": 60000,
-      "relistAfterType": "orderAmount",
-      "relistAfter": 5,
-      "maxBuyAmount": 2048,
-      "manipulationTriggerPercentage": 2,
-      "relistWorthThreshold": 250000
-    },
-    "ENCHANTED_BREAD": {
-      "maxPrice": 950,
-      "minProfit": 25,
-      "minPercentage": 3,
-      "minBuyOrder": 150,
-      "maxBuyOrder": 50000,
-      "minSellOffer": 150,
-      "maxSellOffer": 50000,
-      "minBuyVolume": 15000,
-      "minSellVolume": 15000,
-      "relistAfterType": "orderAmount",
-      "relistAfter": 5,
-      "maxBuyAmount": 2048,
-      "manipulationTriggerPercentage": 2,
-      "relistWorthThreshold": 250000
-    },
     "ENCHANTED_FERMENTED_SPIDER_EYE": {
       "maxPrice": 105000,
       "minProfit": 2000,
@@ -392,7 +338,7 @@
       "minBuyVolume": 4000,
       "minSellVolume": 4000,
       "relistAfterType": "orderAmount",
-      "relistAfter": 5,
+      "relistAfter": 3,
       "maxBuyAmount": 64,
       "manipulationTriggerPercentage": 2,
       "relistWorthThreshold": 1000000
@@ -408,7 +354,7 @@
       "minBuyVolume": 3000,
       "minSellVolume": 3000,
       "relistAfterType": "orderAmount",
-      "relistAfter": 5,
+      "relistAfter": 3,
       "maxBuyAmount": 1,
       "manipulationTriggerPercentage": 1.5,
       "relistWorthThreshold": 5000000
