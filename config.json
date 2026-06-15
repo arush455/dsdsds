@@ -54,7 +54,7 @@
     "maxBuyOrders": 7,
     "sortBy": "coinsPerHour",
     "relistAfterType": "orderAmount",
-    "relistAfter": 3,
+    "relistAfter": 6,
     "relistWorthThreshold": 1000000
   },
   "volume": {

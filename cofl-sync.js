@@ -166,16 +166,16 @@ function buildSelectiveEntry(item, t) {
   const p = item.buyPrice;
   let relistAfter, maxBuyAmount;
   if (p > 5_000_000) {
-    relistAfter = 4;
+    relistAfter = 16;
     maxBuyAmount = 1;
   } else if (p > 1_000_000) {
-    relistAfter = 8;
+    relistAfter = 32;
     maxBuyAmount = 5;
   } else if (p > 100_000) {
-    relistAfter = 64;
+    relistAfter = 256;
     maxBuyAmount = 64;
   } else {
-    relistAfter = 256;
+    relistAfter = 1024;
     maxBuyAmount = 2048;
   }
   return {
