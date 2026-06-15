@@ -69,8 +69,8 @@
     "enabled": true,
     "ip": ["154.7.187.91", "193.160.236.149"],
     "port": [6567, 5171],
-    "username": "kbjinmkw",
-    "password": "9tnwdmsmnfoe"
+    "username": ["kbjinmkw", "kbjinmkw"],
+    "password": ["9tnwdmsmnfoe", "9tnwdmsmnfoe"]
   },
   "selectiveBuys": "both"
 }
