@@ -1,249 +1,300 @@
 /*
- * webhook-proxy.js — sits between mbf-linux and Discord.
+ * webhook-proxy.js — limit-guard + account orchestrator for MBF.
  *
- * - Receives webhooks from mbf-linux on localhost:8765
- * - Parses "Buy Order Placed" and "Sell Offer Placed" worth values
- * - Tracks buy-side and sell-side daily totals (each has a 15B limit)
- * - Kills mbf-linux when either side hits the configured limit (default 13B)
- * - Forwards every webhook to your real Discord URL unchanged
- * - Resets totals automatically at 00:00 UTC
+ * Run this INSTEAD of start.js. It:
+ *   1. Reads config.json (the master with the "accounts" array).
+ *   2. Launches mbf-linux for ONE enabled account at a time.
+ *   3. Receives the bot's webhooks on localhost:<proxyPort>, forwards them to your
+ *      real Discord webhook, and tallies each account's buy/sell order totals.
+ *   4. When the active account hits the per-account limit (default 13B on buy OR sell),
+ *      it stops the bot, marks that account done, and switches to the next enabled
+ *      account — giving every account ~2B spare.
+ *   5. When all accounts are capped, it idles until 00:00 UTC, then resets and restarts.
  *
- * Start it before (or alongside) the bot:
+ * Start it (single process, replaces start.js):
  *   node webhook-proxy.js
  *
- * Config lives at the top of this file or in webhook-proxy.config.json.
+ * Settings: webhook-proxy.config.json  (proxyPort, dailyLimitCoins, realWebhook)
+ * Per-account daily progress is saved in .proxy-state.json (survives restarts).
  */
 
 const http  = require("http");
 const https = require("https");
 const fs    = require("fs");
 const path  = require("path");
+const { spawn } = require("child_process");
+const { buildRuntimeConfig } = require("./lib-mbf.js");
 
-// ── Config ────────────────────────────────────────────────────────────────────
+// ── Config ──────────────────────────────────────────────────────────────────
 
-// Accept either filename (with or without dash) to match however you saved it.
 const CFG_PATH = ["webhook-proxy.config.json", "webhookproxy.config.json"]
   .map(n => path.join(__dirname, n))
   .find(p => fs.existsSync(p)) || path.join(__dirname, "webhook-proxy.config.json");
 
+const MASTER_PATH   = path.join(__dirname, "config.json");
+const MASTER_BACKUP = path.join(__dirname, ".config.master.json");
+const MBF_BIN       = path.join(__dirname, "mbf-linux");
+
 let CFG = {
   proxyPort:       8765,
-  dailyLimitCoins: 13_000_000_000,   // stop the bot at 13B (2B spare)
-  realWebhook:     "",               // your real Discord webhook (set here, see below)
+  dailyLimitCoins: 13_000_000_000,
+  realWebhook:     "",
   statePath:       path.join(__dirname, ".proxy-state.json"),
+  restartCrashedAfterSec: 10,
 };
+try { CFG = { ...CFG, ...JSON.parse(fs.readFileSync(CFG_PATH, "utf8")) }; } catch { /* defaults */ }
 
-try {
-  const file = JSON.parse(fs.readFileSync(CFG_PATH, "utf8"));
-  CFG = { ...CFG, ...file };
-} catch { /* use defaults */ }
+const LIMIT = CFG.dailyLimitCoins;
+const PORT  = CFG.proxyPort;
 
-function isLoopback(url) {
-  return /(^https?:\/\/)?(127\.0\.0\.1|localhost)(:|\/|$)/i.test(url || "");
-}
-
-// Pull the real Discord webhook from config.json ONLY if not set in the proxy config.
-// start.js swaps config.json's webhook to localhost while running, so we ignore loopback URLs
-// to avoid the proxy forwarding to itself in a loop.
-if (!CFG.realWebhook || isLoopback(CFG.realWebhook)) {
-  try {
-    const bot = JSON.parse(fs.readFileSync(path.join(__dirname, "config.json"), "utf8"));
-    if (bot.webhook && !isLoopback(bot.webhook)) CFG.realWebhook = bot.webhook;
-  } catch { /* ignore */ }
-}
-if (isLoopback(CFG.realWebhook)) CFG.realWebhook = ""; // never forward to ourselves
-
-// ── State (persisted so a proxy restart doesn't reset the counter) ────────────
-
-function todayUTC() {
-  return new Date().toISOString().slice(0, 10); // "2026-06-15"
-}
-
-function loadState() {
-  try {
-    const s = JSON.parse(fs.readFileSync(CFG.statePath, "utf8"));
-    if (s.date === todayUTC()) return s;
-  } catch { /* no file yet */ }
-  return { date: todayUTC(), buyTotal: 0, sellTotal: 0, stopped: false };
-}
-
-function saveState(s) {
-  fs.writeFileSync(CFG.statePath, JSON.stringify(s, null, 2));
-}
-
-let STATE = loadState();
-
-// Reset at midnight UTC
-function scheduleReset() {
-  const now  = Date.now();
-  const next = new Date();
-  next.setUTCHours(24, 0, 0, 0);
-  const ms = next.getTime() - now;
-  setTimeout(() => {
-    STATE = { date: todayUTC(), buyTotal: 0, sellTotal: 0, stopped: false };
-    saveState(STATE);
-    log("Daily limit reset at 00:00 UTC.");
-    scheduleReset();
-  }, ms);
-}
-scheduleReset();
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function log(msg) {
-  const ts = new Date().toISOString();
-  const line = `[${ts}] ${msg}`;
-  console.log(line);
-}
-
+function log(msg) { console.log(`[guard ${new Date().toISOString()}] ${msg}`); }
+function isLoopback(url) { return /(^https?:\/\/)?(127\.0\.0\.1|localhost)(:|\/|$)/i.test(url || ""); }
 function fmt(n) {
   if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
   if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
   if (n >= 1e3) return (n / 1e3).toFixed(2) + "K";
-  return n.toString();
+  return String(n);
 }
 
-// Parse coin strings like "16.14M coins", "308.55K coins", "1.2B coins", "12345 coins"
-function parseCoins(str) {
-  if (!str) return 0;
-  const clean = str.replace(/,/g, "").trim();
-  const m = clean.match(/([\d.]+)\s*([KMBkmb])?/);
-  if (!m) return 0;
-  let val = parseFloat(m[1]);
-  if (isNaN(val)) return 0;
-  const suffix = (m[2] || "").toUpperCase();
-  if (suffix === "K") val *= 1_000;
-  if (suffix === "M") val *= 1_000_000;
-  if (suffix === "B") val *= 1_000_000_000;
-  return Math.round(val);
+// ── Load master config (recover if config.json was left as a runtime copy) ────
+
+let masterConfig;
+(function loadMaster() {
+  let cfg;
+  try { cfg = JSON.parse(fs.readFileSync(MASTER_PATH, "utf8")); }
+  catch (e) { log(`Cannot read config.json: ${e.message}`); process.exit(1); }
+
+  if (Array.isArray(cfg.accounts)) {
+    masterConfig = cfg;
+    fs.writeFileSync(MASTER_BACKUP, JSON.stringify(masterConfig, null, 2)); // refresh pristine copy
+  } else if (fs.existsSync(MASTER_BACKUP)) {
+    log("config.json looks like a leftover runtime copy — recovering master from .config.master.json");
+    masterConfig = JSON.parse(fs.readFileSync(MASTER_BACKUP, "utf8"));
+    fs.writeFileSync(MASTER_PATH, JSON.stringify(masterConfig, null, 2));
+  } else {
+    // No accounts array and no backup: run as-is in single-bot (global) mode.
+    masterConfig = cfg;
+  }
+})();
+
+// Real Discord webhook: prefer the proxy config, else the master's webhook.
+if (!CFG.realWebhook || isLoopback(CFG.realWebhook)) {
+  if (masterConfig.webhook && !isLoopback(masterConfig.webhook)) CFG.realWebhook = masterConfig.webhook;
+}
+if (isLoopback(CFG.realWebhook)) CFG.realWebhook = "";
+
+// Rotation order: enabled accounts (per-account mode) or a single global run.
+const perAccountMode = Array.isArray(masterConfig.accounts);
+const rotation = perAccountMode
+  ? masterConfig.accounts.filter(a => a.enabled !== false).map(a => a.username)
+  : ["__ALL__"];
+
+if (rotation.length === 0) { log("No enabled accounts in config.json. Enable at least one."); process.exit(1); }
+
+// ── Per-account daily state ───────────────────────────────────────────────────
+
+function todayUTC() { return new Date().toISOString().slice(0, 10); }
+
+function freshState() {
+  const accounts = {};
+  for (const u of rotation) accounts[u] = { buy: 0, sell: 0, done: false };
+  return { date: todayUTC(), accounts };
+}
+
+let STATE;
+(function loadState() {
+  try {
+    const s = JSON.parse(fs.readFileSync(CFG.statePath, "utf8"));
+    if (s.date === todayUTC() && s.accounts) {
+      STATE = s;
+      for (const u of rotation) if (!STATE.accounts[u]) STATE.accounts[u] = { buy: 0, sell: 0, done: false };
+      return;
+    }
+  } catch { /* none */ }
+  STATE = freshState();
+})();
+
+function saveState() { try { fs.writeFileSync(CFG.statePath, JSON.stringify(STATE, null, 2)); } catch {} }
+function acc(u) { return (STATE.accounts[u] ||= { buy: 0, sell: 0, done: false }); }
+
+// ── Bot lifecycle ─────────────────────────────────────────────────────────────
+
+let child = null;
+let currentAccount = null;
+let rotating = false;
+let shuttingDown = false;
+
+function restoreMaster() {
+  try { fs.writeFileSync(MASTER_PATH, JSON.stringify(masterConfig, null, 2)); } catch {}
+}
+
+function spawnBotFor(username) {
+  currentAccount = username;
+  const opts = { routeWebhook: true, guardPort: PORT };
+  if (perAccountMode) opts.onlyAccount = username;
+  const { runtime } = buildRuntimeConfig(masterConfig, opts);
+  fs.writeFileSync(MASTER_PATH, JSON.stringify(runtime, null, 2));
+
+  const a = acc(username);
+  const label = username === "__ALL__" ? "all accounts" : username;
+  log(`▶ Launching mbf-linux for ${label} (today: buy ${fmt(a.buy)}, sell ${fmt(a.sell)} / cap ${fmt(LIMIT)})`);
+
+  child = spawn(MBF_BIN, [], { stdio: "inherit", cwd: __dirname });
+
+  child.on("error", (e) => { log(`Failed to launch mbf-linux: ${e.message}`); });
+
+  child.on("exit", (code, signal) => {
+    const wasRotating = rotating;
+    rotating = false;
+    child = null;
+    restoreMaster();
+    if (shuttingDown) return;
+    if (wasRotating) { startNextAccount(); return; }
+    // Unexpected exit (crash / manual stop): retry same account unless it's capped.
+    if (!acc(username).done) {
+      const secs = CFG.restartCrashedAfterSec;
+      log(`mbf-linux for ${username} exited (code ${code}${signal ? ", " + signal : ""}). Restarting in ${secs}s...`);
+      setTimeout(() => { if (!shuttingDown && !acc(username).done) spawnBotFor(username); }, secs * 1000);
+    }
+  });
+}
+
+function killBotForRotation() {
+  if (child && !child.killed) { rotating = true; child.kill("SIGTERM"); }
+  else startNextAccount();
+}
+
+function startNextAccount() {
+  const next = rotation.find(u => !acc(u).done);
+  if (!next) {
+    log(`✅ All accounts hit their ${fmt(LIMIT)} cap. Idling until 00:00 UTC.`);
+    notifyDiscord(`✅ All accounts reached the ${fmt(LIMIT)} daily cap. Pausing until reset (00:00 UTC).`);
+    restoreMaster();
+    return;
+  }
+  spawnBotFor(next);
+}
+
+function capCurrentAndRotate(reason) {
+  const u = currentAccount;
+  acc(u).done = true;
+  saveState();
+  const label = u === "__ALL__" ? "Bot" : u;
+  log(`🧯 ${label} reached cap (${reason}). ${perAccountMode ? "Switching account." : "Stopping."}`);
+  notifyDiscord(`🧯 **${label}** hit the ${fmt(LIMIT)} cap (${reason}).${perAccountMode ? " Switching to the next account." : " Stopping until 00:00 UTC."}`);
+  killBotForRotation();
 }
 
 // ── Webhook parsing ───────────────────────────────────────────────────────────
 
-// Returns { type: "buy"|"sell"|null, worth: number }
+function parseCoins(str) {
+  const m = String(str || "").replace(/,/g, "").trim().match(/([\d.]+)\s*([KMBkmb])?/);
+  if (!m) return 0;
+  let v = parseFloat(m[1]); if (isNaN(v)) return 0;
+  const s = (m[2] || "").toUpperCase();
+  if (s === "K") v *= 1e3; if (s === "M") v *= 1e6; if (s === "B") v *= 1e9;
+  return Math.round(v);
+}
+
 function extractOrderValue(payload) {
-  const embeds = payload.embeds || [];
-  for (const embed of embeds) {
+  for (const embed of payload.embeds || []) {
     const title = (embed.title || embed.description || "").toLowerCase();
     const isBuy  = title.includes("buy order placed");
     const isSell = title.includes("sell offer placed");
     if (!isBuy && !isSell) continue;
-
-    // Worth lives in embed fields or the description
-    const fields = embed.fields || [];
-    for (const f of fields) {
+    for (const f of embed.fields || []) {
       const name = (f.name || "").toLowerCase();
       if (name.includes("worth") || name.includes("value") || name.includes("amount")) {
-        const worth = parseCoins(f.value || "");
-        if (worth > 0) return { type: isBuy ? "buy" : "sell", worth };
+        const w = parseCoins(f.value);
+        if (w > 0) return { type: isBuy ? "buy" : "sell", worth: w };
       }
     }
-
-    // Fallback: scrape any coin value from the description
-    const desc = embed.description || "";
-    const match = desc.match(/([\d.,]+\s*[KMBkmb]?\s*coins)/i);
-    if (match) {
-      const worth = parseCoins(match[1]);
-      if (worth > 0) return { type: isBuy ? "buy" : "sell", worth };
-    }
+    const m = (embed.description || "").match(/([\d.,]+\s*[KMBkmb]?\s*coins)/i);
+    if (m) { const w = parseCoins(m[1]); if (w > 0) return { type: isBuy ? "buy" : "sell", worth: w }; }
   }
   return { type: null, worth: 0 };
 }
 
-// ── Stop the bot ──────────────────────────────────────────────────────────────
-
-function stopBot(reason) {
-  if (STATE.stopped) return;
-  STATE.stopped = true;
-  saveState(STATE);
-  log(`LIMIT REACHED — ${reason}. Stopping mbf-linux...`);
-
-  // Notify Discord before killing
-  const msg = `🛑 **MBF stopped** — daily limit guard triggered.\n${reason}\nBuy total: **${fmt(STATE.buyTotal)}** | Sell total: **${fmt(STATE.sellTotal)}**\nLimit resets at 00:00 UTC.`;
-  forwardToDiscord({ content: msg }).catch(() => {});
-
-  // Give the notification a moment to send, then kill
-  setTimeout(() => {
-    try {
-      // Kill by process name
-      const { execSync } = require("child_process");
-      execSync("pkill -f mbf-linux", { stdio: "ignore" });
-      log("mbf-linux terminated.");
-    } catch {
-      log("Warning: could not find mbf-linux process to kill. Stop it manually.");
-    }
-  }, 2000);
+function recordOrder(type, worth) {
+  if (!currentAccount) return;
+  const a = acc(currentAccount);
+  if (a.done) return;
+  if (type === "buy") a.buy += worth; else a.sell += worth;
+  saveState();
+  const label = currentAccount === "__ALL__" ? "ALL" : currentAccount;
+  log(`${type === "buy" ? "Buy " : "Sell"} ${fmt(worth)} | ${label}: buy ${fmt(a.buy)} / sell ${fmt(a.sell)} (cap ${fmt(LIMIT)})`);
+  if (a.buy >= LIMIT || a.sell >= LIMIT) {
+    capCurrentAndRotate(a.buy >= LIMIT ? `buy ${fmt(a.buy)}` : `sell ${fmt(a.sell)}`);
+  }
 }
 
-// ── Forward to Discord ────────────────────────────────────────────────────────
+// ── Discord forwarding ────────────────────────────────────────────────────────
 
 function forwardToDiscord(payload) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     if (!CFG.realWebhook) return resolve();
-    let url;
-    try { url = new URL(CFG.realWebhook); } catch { return resolve(); }
+    let url; try { url = new URL(CFG.realWebhook); } catch { return resolve(); }
     const body = JSON.stringify(payload);
     const req = https.request(
       { hostname: url.hostname, path: url.pathname + url.search, method: "POST",
         headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } },
       (res) => { res.resume(); resolve(); }
     );
-    req.on("error", reject);
-    req.write(body);
-    req.end();
+    req.on("error", () => resolve());
+    req.write(body); req.end();
   });
+}
+function notifyDiscord(content) { forwardToDiscord({ content }).catch(() => {}); }
+
+// ── Midnight reset ────────────────────────────────────────────────────────────
+
+function scheduleReset() {
+  const next = new Date(); next.setUTCHours(24, 0, 0, 0);
+  setTimeout(() => {
+    STATE = freshState(); saveState();
+    log("Daily limits reset (00:00 UTC).");
+    notifyDiscord("🔄 Daily limits reset. Resuming flipping.");
+    if (!child) startNextAccount(); // resume if we were idle
+    scheduleReset();
+  }, next.getTime() - Date.now());
 }
 
 // ── HTTP server ───────────────────────────────────────────────────────────────
 
 const server = http.createServer((req, res) => {
   if (req.method !== "POST") { res.writeHead(405).end(); return; }
-
   let body = "";
   req.on("data", c => (body += c));
   req.on("end", async () => {
-    res.writeHead(204).end(); // always ack immediately so the bot doesn't hang
-
-    let payload;
-    try { payload = JSON.parse(body); } catch { return; }
-
-    // Reload state in case it was manually edited
-    STATE = loadState();
-
-    if (!STATE.stopped) {
-      const { type, worth } = extractOrderValue(payload);
-
-      if (type === "buy" && worth > 0) {
-        STATE.buyTotal += worth;
-        saveState(STATE);
-        log(`Buy order placed: ${fmt(worth)} | Buy total today: ${fmt(STATE.buyTotal)} / ${fmt(CFG.dailyLimitCoins)}`);
-        if (STATE.buyTotal >= CFG.dailyLimitCoins) {
-          stopBot(`Buy-side limit hit: ${fmt(STATE.buyTotal)} spent`);
-        }
-      } else if (type === "sell" && worth > 0) {
-        STATE.sellTotal += worth;
-        saveState(STATE);
-        log(`Sell offer placed: ${fmt(worth)} | Sell total today: ${fmt(STATE.sellTotal)} / ${fmt(CFG.dailyLimitCoins)}`);
-        if (STATE.sellTotal >= CFG.dailyLimitCoins) {
-          stopBot(`Sell-side limit hit: ${fmt(STATE.sellTotal)} listed`);
-        }
-      }
-    }
-
-    // Always forward to Discord regardless
-    try { await forwardToDiscord(payload); } catch { /* non-fatal */ }
+    res.writeHead(204).end();
+    let payload; try { payload = JSON.parse(body); } catch { return; }
+    const { type, worth } = extractOrderValue(payload);
+    if (type && worth > 0) recordOrder(type, worth);
+    forwardToDiscord(payload);
   });
 });
 
-server.listen(CFG.proxyPort, "127.0.0.1", () => {
-  log(`Webhook proxy running on http://127.0.0.1:${CFG.proxyPort}`);
-  log(`Daily limit set to ${fmt(CFG.dailyLimitCoins)} (bot stops at this threshold).`);
-  log(`Buy total today:  ${fmt(STATE.buyTotal)}`);
-  log(`Sell total today: ${fmt(STATE.sellTotal)}`);
-  if (!CFG.realWebhook) log("Warning: no Discord webhook URL found — notifications will not be forwarded.");
-});
+// ── Shutdown handling ─────────────────────────────────────────────────────────
 
-server.on("error", (e) => {
-  log(`Server error: ${e.message}`);
-  process.exit(1);
+function shutdown(sig) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log(`Received ${sig} — stopping bot and restoring config...`);
+  if (child && !child.killed) child.kill("SIGTERM");
+  setTimeout(() => { restoreMaster(); process.exit(0); }, 1500);
+}
+for (const s of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(s, () => shutdown(s));
+process.on("exit", () => { if (!child) restoreMaster(); });
+
+// ── Go ──────────────────────────────────────────────────────────────────────
+
+server.listen(PORT, "127.0.0.1", () => {
+  log(`Limit guard on http://127.0.0.1:${PORT} | per-account cap ${fmt(LIMIT)} | mode: ${perAccountMode ? "per-account rotation" : "single/global"}`);
+  log(`Rotation order: ${rotation.join(" -> ")}`);
+  if (!CFG.realWebhook) log("Warning: no Discord webhook found — order webhooks won't be forwarded.");
+  const allDone = rotation.every(u => acc(u).done);
+  if (allDone) { log("All accounts already capped for today. Idling until 00:00 UTC."); restoreMaster(); }
+  else startNextAccount();
+  scheduleReset();
 });
+server.on("error", (e) => { log(`Server error: ${e.message}`); process.exit(1); });
