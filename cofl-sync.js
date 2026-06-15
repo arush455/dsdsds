@@ -50,6 +50,8 @@ const DEFAULTS = {
     minVolume: 1000,
     maxPrice: 120000000,
     skipManipulated: true,
+    minBalanceRatio: 0.25, // slower side must be >=25% of the faster side (avoids one-sided pile-ups)
+    relistAfter: 3,        // relist auto items only when pushed past Nth order
   },
 };
 
@@ -113,9 +115,11 @@ async function fetchFlips(cfg) {
   if (cfg.usePremiumDemand && cfg.coflToken && cfg.coflToken !== "PASTE_YOUR_COFL_TOKEN_HERE") {
     try {
       log("Fetching premium demand-aware bazaar flips...");
-      return await httpsGetJson(API_HOST, PREMIUM_PATH, cfg.coflToken);
+      const data = await httpsGetJson(API_HOST, PREMIUM_PATH, cfg.coflToken);
+      log("✅ PREMIUM endpoint active (demand-aware data).");
+      return data;
     } catch (err) {
-      log(`Premium endpoint failed (${err.message}). Falling back to the free spread endpoint.`);
+      log(`⚠️  Premium endpoint failed (${err.message}). Falling back to the FREE spread endpoint — flip quality will be lower.`);
     }
   } else if (cfg.usePremiumDemand) {
     log("No valid token set — using the free spread endpoint. Add your /cofl api token for premium demand data.");
@@ -172,9 +176,9 @@ function buildSelectiveEntry(item, t) {
   else maxBuyAmount = 2048;
   return {
     ...buildWhitelistEntry(item, t),
-    // Relist only when pushed out of the top 5 orders (let orders sit and fill).
+    // Relist only when pushed out of the top N orders (let orders sit and fill).
     relistAfterType: "orderAmount",
-    relistAfter: 5,
+    relistAfter: typeof t.relistAfter === "number" ? t.relistAfter : 3,
     maxBuyAmount,
     manipulationTriggerPercentage: 2,
     relistWorthThreshold: Math.max(250000, Math.round(p * 5)),
@@ -236,6 +240,18 @@ async function runOnce(cfg) {
   }
 
   const t = cfg.thresholds;
+  // Effective throughput of a flip is limited by the SLOWER side. An item with
+  // 1M buy volume but 2k sell volume will pile up unsold — rank by the min of the
+  // two sides so we favour items that actually cycle both ways.
+  const throughput = (i) => Math.min(i.buyVolume, i.sellVolume);
+  // Balance ratio: how lopsided the two sides are. 1.0 = perfectly balanced.
+  const balance = (i) => {
+    const hi = Math.max(i.buyVolume, i.sellVolume);
+    const lo = Math.min(i.buyVolume, i.sellVolume);
+    return hi > 0 ? lo / hi : 0;
+  };
+  const minBalance = typeof t.minBalanceRatio === "number" ? t.minBalanceRatio : 0.25;
+
   const candidates = raw
     .map(normalize)
     .filter((i) => i.tag)
@@ -246,8 +262,10 @@ async function runOnce(cfg) {
     .filter((i) => i.percentage >= t.minPercentage)
     .filter((i) => i.buyPrice > 0 && i.buyPrice <= t.maxPrice)
     .filter((i) => i.buyVolume >= t.minVolume && i.sellVolume >= t.minVolume)
-    // rank by approximate coins/hour potential: per-item profit * available volume
-    .sort((a, b) => b.profit * b.sellVolume - a.profit * a.sellVolume)
+    // Drop one-sided items: if sells are <25% of buys (or vice versa) it won't cycle.
+    .filter((i) => balance(i) >= minBalance)
+    // Rank by realistic coins/hour: per-flip profit × throughput of the slower side.
+    .sort((a, b) => b.profit * throughput(b) - a.profit * throughput(a))
     .slice(0, cfg.maxAutoItems);
 
   const newAuto = [];
