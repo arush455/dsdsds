@@ -22,6 +22,16 @@ const fs = require("fs");
 const https = require("https");
 const path = require("path");
 
+// Load ai-advisor if present (accepts both filename spellings).
+const _advisorPath = ["ai-advisor.js", "aiadvisor.js"]
+  .map(n => path.join(__dirname, n))
+  .find(p => fs.existsSync(p));
+const advisor = _advisorPath ? require(_advisorPath) : {
+  itemScore:                () => 1,
+  isManipulationCoolingDown: () => false,
+  getSuggestedThresholds:   (c) => c,
+};
+
 const API_HOST = "sky.coflnet.com";
 const PREMIUM_PATH = "/api/flip/bazaar/spread/deemand"; // CoflNet's route is spelled "deemand"
 const FREE_PATH = "/api/flip/bazaar/spread";
@@ -238,7 +248,12 @@ async function runOnce(cfg) {
     console.log(JSON.stringify(raw[0], null, 2));
   }
 
-  const t = cfg.thresholds;
+  // Apply AI advisor threshold suggestions (advisory — may adjust minPercentage).
+  const suggestedThresholds = advisor.getSuggestedThresholds(cfg.thresholds);
+  if (suggestedThresholds.minPercentage !== cfg.thresholds.minPercentage) {
+    log(`[advisor] minPercentage adjusted: ${cfg.thresholds.minPercentage}% → ${suggestedThresholds.minPercentage}% (based on recent session performance)`);
+  }
+  const t = suggestedThresholds;
   // Premium gives currentProfitPerHour (coins/hour) directly — the best ranking signal.
   // Fall back to per-flip profit × volume when it's absent (free endpoint).
   const cph = (i) => (!Number.isNaN(i.profitPerHour) ? i.profitPerHour : i.profit * i.volume);
@@ -249,19 +264,20 @@ async function runOnce(cfg) {
   const stage = (name, arr, pred) => { const out = arr.filter(pred); funnel[name] = `${out.length}/${arr.length}`; return out; };
 
   let pool = raw.map(normalize).filter((i) => i.tag);
-  pool = stage("not-blacklisted", pool, (i) => !blacklist.has(i.tag));
-  pool = stage("not-manual",      pool, (i) => !manualKeys.has(i.tag));
-  pool = stage("not-manipulated", pool, (i) => !(t.skipManipulated && i.isManipulated));
-  pool = stage("minProfit",       pool, (i) => i.profit >= t.minProfit);
-  pool = stage("minPercentage",   pool, (i) => i.percentage >= t.minPercentage);
-  pool = stage("minProfitPerHour",pool, (i) => cph(i) >= minCph);
-  pool = stage("maxPrice",        pool, (i) => i.buyPrice > 0 && i.buyPrice <= t.maxPrice);
-  pool = stage("minVolume",       pool, (i) => i.volume >= t.minVolume);
+  pool = stage("not-blacklisted",   pool, (i) => !blacklist.has(i.tag));
+  pool = stage("not-manual",        pool, (i) => !manualKeys.has(i.tag));
+  pool = stage("not-manipulated",   pool, (i) => !(t.skipManipulated && i.isManipulated));
+  pool = stage("not-manip-cooldown",pool, (i) => !advisor.isManipulationCoolingDown(i.tag));
+  pool = stage("minProfit",         pool, (i) => i.profit >= t.minProfit);
+  pool = stage("minPercentage",     pool, (i) => i.percentage >= t.minPercentage);
+  pool = stage("minProfitPerHour",  pool, (i) => cph(i) >= minCph);
+  pool = stage("maxPrice",          pool, (i) => i.buyPrice > 0 && i.buyPrice <= t.maxPrice);
+  pool = stage("minVolume",         pool, (i) => i.volume >= t.minVolume);
   log(`Filter funnel (survivors/input): ${Object.entries(funnel).map(([k, v]) => `${k} ${v}`).join(" | ")}`);
 
   const candidates = pool
-    // Rank by coins/hour — exactly the metric you care about.
-    .sort((a, b) => cph(b) - cph(a))
+    // Rank by coins/hour multiplied by advisor item score so proven items rank higher.
+    .sort((a, b) => cph(b) * advisor.itemScore(b.tag) - cph(a) * advisor.itemScore(a.tag))
     .slice(0, cfg.maxAutoItems);
 
   const newAuto = [];
@@ -277,7 +293,7 @@ async function runOnce(cfg) {
   fs.renameSync(tmp, filterPath);
   fs.writeFileSync(SIDECAR_PATH, JSON.stringify({ updatedAt: new Date().toISOString(), keys: newAuto }, null, 2));
 
-  const summary = `CoflNet sync: ${newAuto.length} bazaar item(s) auto-listed (from ${raw.length} scanned). Top: ${candidates.slice(0, 5).map((i) => i.tag).join(", ") || "none"}`;
+  const summary = `CoflNet sync: ${newAuto.length} bazaar item(s) auto-listed (from ${raw.length} scanned). Top: ${candidates.slice(0, 5).map((i) => `${i.tag}(x${advisor.itemScore(i.tag).toFixed(2)})`).join(", ") || "none"}`;
   log(summary);
   postWebhook(cfg.webhook, `🔄 ${summary}`);
 }

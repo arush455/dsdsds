@@ -34,6 +34,17 @@ if (!_libPath) {
 }
 const { buildRuntimeConfig } = require(_libPath);
 
+// Load ai-advisor if present (accepts both filename spellings).
+const _advisorPath = ["ai-advisor.js", "aiadvisor.js"]
+  .map(n => path.join(__dirname, n))
+  .find(p => fs.existsSync(p));
+const advisor = _advisorPath ? require(_advisorPath) : {
+  startSession:          () => {},
+  recordLimitUsed:       () => {},
+  recordWebhookPayload:  () => {},
+  recordManipulationFlag: () => {},
+};
+
 // ── Config ──────────────────────────────────────────────────────────────────
 
 const CFG_PATH = ["webhook-proxy.config.json", "webhookproxy.config.json"]
@@ -158,11 +169,25 @@ function spawnBotFor(username) {
   const { runtime } = buildRuntimeConfig(masterConfig, opts);
   fs.writeFileSync(MASTER_PATH, JSON.stringify(runtime, null, 2));
 
+  advisor.startSession(username);
+
   const a = acc(username);
   const label = username === "__ALL__" ? "all accounts" : username;
   log(`▶ Launching mbf-linux for ${label} (today: buy ${fmt(a.buy)}, sell ${fmt(a.sell)} / cap ${fmt(limitFor(username))})`);
 
-  child = spawn(MBF_BIN, [], { stdio: "inherit", cwd: __dirname });
+  child = spawn(MBF_BIN, [], { stdio: ["inherit", "pipe", "inherit"], cwd: __dirname });
+
+  // Forward bot stdout to our own stdout so terminal output is preserved.
+  child.stdout.on("data", chunk => {
+    process.stdout.write(chunk);
+    // Scan for manipulation detection log lines from MBF.
+    const text = chunk.toString();
+    const manip = /MANIPULATION DETECTED FOR ITEM (\S+)/gi;
+    let m;
+    while ((m = manip.exec(text)) !== null) {
+      advisor.recordManipulationFlag(m[1].toUpperCase());
+    }
+  });
 
   child.on("error", (e) => { log(`Failed to launch mbf-linux: ${e.message}`); });
 
@@ -255,6 +280,7 @@ function recordOrder(type, worth) {
   const a = acc(currentAccount);
   if (a.done) return;
   if (type === "buy") a.buy += worth; else a.sell += worth;
+  advisor.recordLimitUsed(worth);
   saveState();
   const label = currentAccount === "__ALL__" ? "ALL" : currentAccount;
   const total = a.buy + a.sell;
@@ -363,6 +389,7 @@ const server = http.createServer((req, res) => {
     const { type, worth } = extractOrderValue(payload);
     if (type && worth > 0) recordOrder(type, worth);
     forwardToDiscord(payload);
+    advisor.recordWebhookPayload(payload);
   });
 });
 
