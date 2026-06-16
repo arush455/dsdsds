@@ -2,8 +2,8 @@
   "key": "9uZO3QWqV7j06FhJ.mbf.6e7e01e6f0231625cabf87f562a290d4",
   "selectiveAccountSwitch": true,
   "accounts": [
-    { "username": "_Arusch455_", "enabled": true },
-    { "username": "LiOrExx",     "enabled": true }
+    { "username": "LiOrExx",     "enabled": true },
+    { "username": "_Arusch455_", "enabled": true }
   ],
   "webhook": "https://discord.com/api/webhooks/1514423564478971914/QALKUCjYl-vOWXRB7QM8QyUtyEK3KnFDQpCWVtztRTyv_joqBze_cf7l2ZFaF_ppcuH6",
   "detailedWebhooks": true,
