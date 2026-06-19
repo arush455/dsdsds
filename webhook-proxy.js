@@ -131,7 +131,7 @@ function todayUTC() { return new Date().toISOString().slice(0, 10); }
 
 function freshState() {
   const accounts = {};
-  for (const u of rotation) accounts[u] = { buy: 0, sell: 0, done: false };
+  for (const u of rotation) accounts[u] = { buy: 0, sell: 0, profit: 0, done: false };
   return { date: todayUTC(), accounts };
 }
 
@@ -141,7 +141,10 @@ let STATE;
     const s = JSON.parse(fs.readFileSync(CFG.statePath, "utf8"));
     if (s.date === todayUTC() && s.accounts) {
       STATE = s;
-      for (const u of rotation) if (!STATE.accounts[u]) STATE.accounts[u] = { buy: 0, sell: 0, done: false };
+      for (const u of rotation) {
+        if (!STATE.accounts[u]) STATE.accounts[u] = { buy: 0, sell: 0, profit: 0, done: false };
+        else if (STATE.accounts[u].profit === undefined) STATE.accounts[u].profit = 0;
+      }
       return;
     }
   } catch { /* none */ }
@@ -149,7 +152,7 @@ let STATE;
 })();
 
 function saveState() { try { fs.writeFileSync(CFG.statePath, JSON.stringify(STATE, null, 2)); } catch {} }
-function acc(u) { return (STATE.accounts[u] ||= { buy: 0, sell: 0, done: false }); }
+function acc(u) { return (STATE.accounts[u] ||= { buy: 0, sell: 0, profit: 0, done: false }); }
 
 // ── Bot lifecycle ─────────────────────────────────────────────────────────────
 
@@ -228,8 +231,8 @@ function capCurrentAndRotate(reason) {
   acc(u).done = true;
   saveState();
   const label = u === "__ALL__" ? "Bot" : u;
-  log(`🧯 ${label} reached cap (${reason}). ${perAccountMode ? "Switching account." : "Stopping."}`);
-  notifyDiscord(`🧯 **${label}** hit the ${fmt(LIMIT)} cap (${reason}).${perAccountMode ? " Switching to the next account." : " Stopping until 00:00 UTC."}`);
+  log(`🧯 ${label} reached cap (${reason}). Profit today: ${fmt(acc(u).profit)}. ${perAccountMode ? "Switching account." : "Stopping."}`);
+  notifyDiscord(`🧯 **${label}** hit the ${fmt(LIMIT)} cap (${reason}).\n💰 Profit today: **${fmt(acc(u).profit)}**${perAccountMode ? "\nSwitching to the next account." : "\nStopping until 00:00 UTC."}`);
   postStatus();
   killBotForRotation();
 }
@@ -243,6 +246,19 @@ function parseCoins(str) {
   const s = (m[2] || "").toUpperCase();
   if (s === "K") v *= 1e3; if (s === "M") v *= 1e6; if (s === "B") v *= 1e9;
   return Math.round(v);
+}
+
+function extractProfit(payload) {
+  for (const embed of payload.embeds || []) {
+    for (const f of embed.fields || []) {
+      const name = (f.name || "").toLowerCase();
+      if (name.includes("profit")) {
+        const p = parseCoins(f.value);
+        if (p > 0) return p;
+      }
+    }
+  }
+  return 0;
 }
 
 function extractOrderValue(payload) {
@@ -388,6 +404,8 @@ const server = http.createServer((req, res) => {
     let payload; try { payload = JSON.parse(body); } catch { return; }
     const { type, worth } = extractOrderValue(payload);
     if (type && worth > 0) recordOrder(type, worth);
+    const profit = extractProfit(payload);
+    if (profit > 0 && currentAccount) { acc(currentAccount).profit += profit; saveState(); }
     forwardToDiscord(payload);
     advisor.recordWebhookPayload(payload);
   });
@@ -399,6 +417,12 @@ function shutdown(sig) {
   if (shuttingDown) return;
   shuttingDown = true;
   log(`Received ${sig} — stopping bot and restoring config...`);
+  if (currentAccount) {
+    const label = currentAccount === "__ALL__" ? "Bot" : currentAccount;
+    const p = acc(currentAccount).profit;
+    log(`💰 Profit today (${label}): ${fmt(p)}`);
+    notifyDiscord(`🛑 **${label}** stopped (${sig}).\n💰 Profit today: **${fmt(p)}**`);
+  }
   if (child && !child.killed) child.kill("SIGTERM");
   setTimeout(() => { restoreMaster(); process.exit(0); }, 1500);
 }
