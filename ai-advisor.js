@@ -133,6 +133,14 @@ async function consultAndTune({ masterConfigPath, coflConfigPath } = {}) {
     "You will be given recent session stats, item fill/cancel data, and the bot's current tunable settings. " +
     "Your job: suggest small, safe adjustments to maximize total daily profit while minimizing how long the bot " +
     "needs to run per day (shorter runtime = lower ban risk) and avoiding manipulated items. " +
+    "Exact semantics of each key — read carefully, the direction matters: " +
+    "'price.manipulationTriggerPercentage' is how big a price swing (%) must be before an item is FLAGGED as manipulated and blocked. " +
+    "LOWERING it makes detection MORE sensitive and blocks MORE items (including legitimate ones) — this is the opposite of 'tightening' filters for quality. " +
+    "If zero/low fills are caused by too many items being blocked, RAISE this value, do not lower it. " +
+    "Only lower it if you see evidence of actual manipulation losses slipping through. " +
+    "'volume.minBuy'/'volume.minSell' raise the liquidity bar — raising them REDUCES the number of eligible items, which can also cause zero fills if set too high. " +
+    "'profit.minPercentage' raising it makes the bot pickier (fewer but bigger-margin trades); lowering it allows more trades. " +
+    "If recent sessions show zero or near-zero fills, treat that as a sign your filters are TOO STRICT, not too loose — your default response should be to loosen (raise manipulationTriggerPercentage, lower volume minimums, lower minPercentage), not tighten further. " +
     "Only suggest values for the exact keys given to you, never invent new keys. " +
     "Respond with ONLY a JSON object: {\"updates\": {\"<key>\": <value>, ...}, \"reasoning\": \"<one short sentence>\"}. " +
     "Make conservative, incremental changes — do not swing values drastically between calls.";
