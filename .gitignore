@@ -1,9 +1,12 @@
 cofl-sync.config.json
 webhook-proxy.config.json
 webhookproxy.config.json
+ai-advisor.config.json
 .cofl-auto.json
 .config.runtime.json
 .proxy-state.json
+.ai-stats.json
+.config.master.json
 config.json.bak
 cofl-sync.log
 *.tmp

@@ -43,6 +43,7 @@ const advisor = _advisorPath ? require(_advisorPath) : {
   recordLimitUsed:       () => {},
   recordWebhookPayload:  () => {},
   recordManipulationFlag: () => {},
+  consultAndTune:        async () => null,
 };
 
 // ── Config ──────────────────────────────────────────────────────────────────
@@ -234,7 +235,27 @@ function capCurrentAndRotate(reason) {
   log(`🧯 ${label} reached cap (${reason}). Profit today: ${fmt(acc(u).profit)}. ${perAccountMode ? "Switching account." : "Stopping."}`);
   notifyDiscord(`🧯 **${label}** hit the ${fmt(LIMIT)} cap (${reason}).\n💰 Profit today: **${fmt(acc(u).profit)}**${perAccountMode ? "\nSwitching to the next account." : "\nStopping until 00:00 UTC."}`);
   postStatus();
+  runAiTuning();
   killBotForRotation();
+}
+
+const COFL_CFG_PATH = ["cofl-sync.config.json", "coflsync.config.json"]
+  .map(n => path.join(__dirname, n))
+  .find(p => fs.existsSync(p));
+
+function runAiTuning() {
+  if (!advisor.consultAndTune) return;
+  advisor.consultAndTune({ masterConfigPath: MASTER_BACKUP, coflConfigPath: COFL_CFG_PATH })
+    .then((result) => {
+      if (!result) return;
+      if (result.error) { log(`[ai-tune] skipped: ${result.error}`); return; }
+      if (result.applied && Object.keys(result.applied).length) {
+        masterConfig = JSON.parse(fs.readFileSync(MASTER_BACKUP, "utf8"));
+        log(`[ai-tune] applied: ${JSON.stringify(result.applied)} — ${result.reasoning}`);
+        notifyDiscord(`🤖 AI tuning applied: \`${JSON.stringify(result.applied)}\`\n${result.reasoning}`);
+      }
+    })
+    .catch((e) => log(`[ai-tune] error: ${e.message}`));
 }
 
 // ── Webhook parsing ───────────────────────────────────────────────────────────
@@ -405,7 +426,11 @@ const server = http.createServer((req, res) => {
     const { type, worth } = extractOrderValue(payload);
     if (type && worth > 0) recordOrder(type, worth);
     const profit = extractProfit(payload);
-    if (profit > 0 && currentAccount) { acc(currentAccount).profit += profit; saveState(); }
+    if (profit > 0 && currentAccount) {
+      acc(currentAccount).profit += profit;
+      saveState();
+      advisor.recordProfit?.(profit);
+    }
     forwardToDiscord(payload);
     advisor.recordWebhookPayload(payload);
   });

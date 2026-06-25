@@ -17,12 +17,170 @@
 
 "use strict";
 
-const fs   = require("fs");
-const path = require("path");
+const fs    = require("fs");
+const path  = require("path");
+const https = require("https");
 
 const STATS_PATH    = path.join(__dirname, ".ai-stats.json");
 const MAX_SESSIONS  = 30;
 const DEFAULT_TARGET_PH = 10_000_000; // 10M coins/hour
+
+const ADVISOR_CFG_PATH = path.join(__dirname, "ai-advisor.config.json");
+function loadAdvisorConfig() {
+  try { return JSON.parse(fs.readFileSync(ADVISOR_CFG_PATH, "utf8")); }
+  catch { return { enabled: false }; }
+}
+
+// Safety bounds: the model may only suggest values inside these ranges,
+// and only for these specific keys. Anything else is ignored.
+const TUNABLE_BOUNDS = {
+  "profit.minPercentage":               [2, 10],
+  "profit.min":                         [50000, 1000000],
+  "orders.maxBuyOrders":                [3, 12],
+  "orders.relistAfter":                 [1, 5],
+  "volume.minBuy":                      [500, 8000],
+  "volume.minSell":                     [500, 8000],
+  "purse.maxSpentPerOrder":             [50000000, 400000000],
+  "price.manipulationTriggerPercentage": [3, 15],
+};
+
+function getAt(obj, dottedKey) {
+  return dottedKey.split(".").reduce((o, k) => (o == null ? undefined : o[k]), obj);
+}
+function setAt(obj, dottedKey, value) {
+  const parts = dottedKey.split(".");
+  let cur = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    cur[parts[i]] = cur[parts[i]] || {};
+    cur = cur[parts[i]];
+  }
+  cur[parts[parts.length - 1]] = value;
+}
+function clamp(v, [lo, hi]) { return Math.max(lo, Math.min(hi, v)); }
+
+function callClaude(apiKey, model, systemPrompt, userPrompt) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({
+      model,
+      max_tokens: 1024,
+      system: systemPrompt,
+      messages: [{ role: "user", content: userPrompt }],
+    });
+    const req = https.request(
+      {
+        hostname: "api.anthropic.com",
+        path: "/v1/messages",
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "Content-Length": Buffer.byteLength(body),
+        },
+      },
+      (res) => {
+        let data = "";
+        res.on("data", (c) => (data += c));
+        res.on("end", () => {
+          if (res.statusCode !== 200) return reject(new Error(`Claude API ${res.statusCode}: ${data.slice(0, 300)}`));
+          try {
+            const parsed = JSON.parse(data);
+            const text = (parsed.content || []).map(b => b.text || "").join("");
+            resolve(text);
+          } catch (e) { reject(e); }
+        });
+      }
+    );
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+function extractJson(text) {
+  const m = String(text || "").match(/\{[\s\S]*\}/);
+  if (!m) return null;
+  try { return JSON.parse(m[0]); } catch { return null; }
+}
+
+// ── 4. Full-config AI tuning via the real Claude API ──────────────────────────
+//
+// Called after each session ends. Sends recent stats + current tunable config
+// values to Claude, asks for adjustments, applies anything within bounds.
+
+async function consultAndTune({ masterConfigPath, coflConfigPath } = {}) {
+  const advisorCfg = loadAdvisorConfig();
+  if (!advisorCfg.enabled || !advisorCfg.anthropicApiKey) return null;
+
+  let masterConfig, coflConfig;
+  try { masterConfig = JSON.parse(fs.readFileSync(masterConfigPath, "utf8")); } catch { return null; }
+  try { coflConfig = coflConfigPath ? JSON.parse(fs.readFileSync(coflConfigPath, "utf8")) : null; } catch { coflConfig = null; }
+
+  const currentTunables = {};
+  for (const key of Object.keys(TUNABLE_BOUNDS)) {
+    const v = getAt(masterConfig, key);
+    if (v !== undefined) currentTunables[key] = v;
+  }
+
+  const recentSessions = _stats.sessions.slice(-10);
+  const topItems = Object.entries(_stats.items)
+    .sort((a, b) => (b[1].fills - b[1].cancels) - (a[1].fills - a[1].cancels))
+    .slice(0, 15)
+    .map(([tag, s]) => ({ tag, fills: s.fills, cancels: s.cancels, manipulationFlags: s.manipulationFlags }));
+
+  const systemPrompt =
+    "You are an autonomous tuning advisor for a Hypixel SkyBlock bazaar flipping bot. " +
+    "You will be given recent session stats, item fill/cancel data, and the bot's current tunable settings. " +
+    "Your job: suggest small, safe adjustments to maximize total daily profit while minimizing how long the bot " +
+    "needs to run per day (shorter runtime = lower ban risk) and avoiding manipulated items. " +
+    "Only suggest values for the exact keys given to you, never invent new keys. " +
+    "Respond with ONLY a JSON object: {\"updates\": {\"<key>\": <value>, ...}, \"reasoning\": \"<one short sentence>\"}. " +
+    "Make conservative, incremental changes — do not swing values drastically between calls.";
+
+  const userPrompt = JSON.stringify({
+    currentTunables,
+    boundsForEachKey: TUNABLE_BOUNDS,
+    recentSessions,
+    topItemsByFillCancelMargin: topItems,
+  }, null, 2);
+
+  let reply;
+  try {
+    reply = await callClaude(advisorCfg.anthropicApiKey, advisorCfg.model || "claude-opus-4-8", systemPrompt, userPrompt);
+  } catch (e) {
+    return { error: e.message };
+  }
+
+  const parsed = extractJson(reply);
+  if (!parsed || !parsed.updates) return { error: "no JSON in reply", raw: reply };
+
+  const applied = {};
+  for (const [key, bounds] of Object.entries(TUNABLE_BOUNDS)) {
+    if (!(key in parsed.updates)) continue;
+    const raw = Number(parsed.updates[key]);
+    if (Number.isNaN(raw)) continue;
+    const safe = clamp(raw, bounds);
+    setAt(masterConfig, key, safe);
+    if (coflConfig && key === "profit.minPercentage") setAt(coflConfig, "thresholds.minPercentage", safe);
+    if (coflConfig && key === "orders.relistAfter") setAt(coflConfig, "thresholds.relistAfter", safe);
+    applied[key] = safe;
+  }
+
+  if (Object.keys(applied).length) {
+    try {
+      fs.writeFileSync(masterConfigPath + ".tmp", JSON.stringify(masterConfig, null, 2));
+      fs.renameSync(masterConfigPath + ".tmp", masterConfigPath);
+    } catch {}
+    if (coflConfig && coflConfigPath) {
+      try {
+        fs.writeFileSync(coflConfigPath + ".tmp", JSON.stringify(coflConfig, null, 2));
+        fs.renameSync(coflConfigPath + ".tmp", coflConfigPath);
+      } catch {}
+    }
+  }
+
+  return { applied, reasoning: parsed.reasoning || "" };
+}
 
 // ── Persistence ────────────────────────────────────────────────────────────────
 
@@ -247,6 +405,13 @@ function recordLimitUsed(worth) {
   saveStats(_stats);
 }
 
+function recordProfit(coins) {
+  if (!_stats.sessions.length || !coins) return;
+  const current = _stats.sessions[_stats.sessions.length - 1];
+  current.profitCoins = (current.profitCoins || 0) + coins;
+  saveStats(_stats);
+}
+
 function getSuggestedThresholds(currentConfig) {
   const cfg    = currentConfig || {};
   const target = cfg.targetProfitPerHour || DEFAULT_TARGET_PH;
@@ -321,8 +486,10 @@ module.exports = {
   recordManipulationFlag,
   startSession,
   recordLimitUsed,
+  recordProfit,
   itemScore,
   isManipulationCoolingDown,
   getSuggestedThresholds,
+  consultAndTune,
   getStats,
 };
