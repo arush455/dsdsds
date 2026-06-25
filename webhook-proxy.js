@@ -479,5 +479,15 @@ server.listen(PORT, "127.0.0.1", () => {
     setInterval(postStatus, statusMin * 60 * 1000);
     log(`Status webhook every ${statusMin} min.`);
   }
+
+  // Periodic background AI tuning, independent of cap/rotation events.
+  let advisorCfgRaw = {};
+  try { advisorCfgRaw = JSON.parse(fs.readFileSync(path.join(__dirname, "ai-advisor.config.json"), "utf8")); } catch { /* not configured */ }
+  const aiIntervalMin = advisorCfgRaw.intervalMinutes;
+  if (advisorCfgRaw.enabled && aiIntervalMin > 0) {
+    setTimeout(runAiTuning, 30000);
+    setInterval(runAiTuning, aiIntervalMin * 60 * 1000);
+    log(`Background AI tuning every ${aiIntervalMin} min.`);
+  }
 });
 server.on("error", (e) => { log(`Server error: ${e.message}`); process.exit(1); });
