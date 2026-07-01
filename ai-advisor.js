@@ -108,6 +108,35 @@ function extractJson(text) {
 // Called after each session ends. Sends recent stats + current tunable config
 // values to Claude, asks for adjustments, applies anything within bounds.
 
+// Writes updated tunables into master + cofl config files (atomic tmp+rename).
+function writeTunables(masterConfigPath, masterConfig, coflConfigPath, coflConfig) {
+  try {
+    fs.writeFileSync(masterConfigPath + ".tmp", JSON.stringify(masterConfig, null, 2));
+    fs.renameSync(masterConfigPath + ".tmp", masterConfigPath);
+  } catch {}
+  if (coflConfig && coflConfigPath) {
+    try {
+      fs.writeFileSync(coflConfigPath + ".tmp", JSON.stringify(coflConfig, null, 2));
+      fs.renameSync(coflConfigPath + ".tmp", coflConfigPath);
+    } catch {}
+  }
+}
+
+function applyUpdates(updates, masterConfig, coflConfig) {
+  const applied = {};
+  for (const [key, bounds] of Object.entries(TUNABLE_BOUNDS)) {
+    if (!(key in updates)) continue;
+    const raw = Number(updates[key]);
+    if (Number.isNaN(raw)) continue;
+    const safe = clamp(raw, bounds);
+    setAt(masterConfig, key, safe);
+    if (coflConfig && key === "profit.minPercentage") setAt(coflConfig, "thresholds.minPercentage", safe);
+    if (coflConfig && key === "orders.relistAfter") setAt(coflConfig, "thresholds.relistAfter", safe);
+    applied[key] = safe;
+  }
+  return applied;
+}
+
 async function consultAndTune({ masterConfigPath, coflConfigPath } = {}) {
   const advisorCfg = loadAdvisorConfig();
   if (!advisorCfg.enabled || !advisorCfg.anthropicApiKey) return null;
@@ -122,7 +151,54 @@ async function consultAndTune({ masterConfigPath, coflConfigPath } = {}) {
     if (v !== undefined) currentTunables[key] = v;
   }
 
+  const now = Date.now();
+  const lastTune = _stats.tuningLog[_stats.tuningLog.length - 1];
+
+  // ── Auto-rollback: if the last change produced ZERO fills for too long, revert it ──
+  const rollbackAfterMin = advisorCfg.rollbackAfterMinutes || 45;
+  if (lastTune && !lastTune.rolledBack && lastTune.before) {
+    const elapsedMin = (now - new Date(lastTune.at).getTime()) / 60000;
+    const fillsSince = _stats.totalFills - (lastTune.fillsAtChange || 0);
+    if (elapsedMin >= rollbackAfterMin && fillsSince === 0) {
+      const reverted = applyUpdates(lastTune.before, masterConfig, coflConfig);
+      writeTunables(masterConfigPath, masterConfig, coflConfigPath, coflConfig);
+      lastTune.rolledBack = true;
+      saveStats(_stats);
+      return {
+        applied: reverted,
+        reasoning: `AUTO-ROLLBACK: ${Math.round(elapsedMin)} min with zero fills since last tuning — reverted to previous values.`,
+      };
+    }
+  }
+
+  // ── Ping-pong guard: don't re-tune too soon after the last applied change ──
+  const cooldownMin = advisorCfg.minMinutesBetweenChanges || 90;
+  if (lastTune && !lastTune.rolledBack) {
+    const elapsedMin = (now - new Date(lastTune.at).getTime()) / 60000;
+    const fillsSince = _stats.totalFills - (lastTune.fillsAtChange || 0);
+    // Allow early re-tune only in the zero-fill emergency case (handled above once
+    // rollbackAfterMinutes is reached); otherwise wait out the cooldown.
+    if (elapsedMin < cooldownMin && fillsSince > 0) {
+      return { error: `cooldown: last change ${Math.round(elapsedMin)} min ago (< ${cooldownMin} min), letting it play out` };
+    }
+    if (elapsedMin < Math.min(cooldownMin, rollbackAfterMin) && fillsSince === 0) {
+      return { error: `cooldown: last change ${Math.round(elapsedMin)} min ago, waiting to see fills before re-tuning` };
+    }
+  }
+
   const recentSessions = _stats.sessions.slice(-10);
+
+  // Tuning history with measured outcomes, so the model can learn what worked.
+  const tuningHistory = _stats.tuningLog.slice(-5).map(t => ({
+    at: t.at,
+    changes: t.applied,
+    reasoning: t.reasoning,
+    rolledBack: !!t.rolledBack,
+    outcomeSince: {
+      fills: _stats.totalFills - (t.fillsAtChange || 0),
+      profitCoins: (_stats.totalProfit || 0) - (t.profitAtChange || 0),
+    },
+  }));
   const topItems = Object.entries(_stats.items)
     .sort((a, b) => (b[1].fills - b[1].cancels) - (a[1].fills - a[1].cancels))
     .slice(0, 15)
@@ -141,6 +217,10 @@ async function consultAndTune({ masterConfigPath, coflConfigPath } = {}) {
     "'volume.minBuy'/'volume.minSell' raise the liquidity bar — raising them REDUCES the number of eligible items, which can also cause zero fills if set too high. " +
     "'profit.minPercentage' raising it makes the bot pickier (fewer but bigger-margin trades); lowering it allows more trades. " +
     "If recent sessions show zero or near-zero fills, treat that as a sign your filters are TOO STRICT, not too loose — your default response should be to loosen (raise manipulationTriggerPercentage, lower volume minimums, lower minPercentage), not tighten further. " +
+    "You are also given 'tuningHistory': your own previous changes with the measured outcome since each change (fills and profitCoins). " +
+    "USE IT: if a past change was followed by good fills/profit, keep or extend that direction; if it was followed by poor results or was rolled back, do not repeat it. " +
+    "If the current settings are performing well (steady fills, positive profit), it is perfectly fine to change NOTHING — respond with an empty updates object. " +
+    "Never simply reverse your own previous change without new evidence (no ping-ponging). " +
     "Only suggest values for the exact keys given to you, never invent new keys. " +
     "Respond with ONLY a JSON object: {\"updates\": {\"<key>\": <value>, ...}, \"reasoning\": \"<one short sentence>\"}. " +
     "Make conservative, incremental changes — do not swing values drastically between calls.";
@@ -149,6 +229,8 @@ async function consultAndTune({ masterConfigPath, coflConfigPath } = {}) {
     currentTunables,
     boundsForEachKey: TUNABLE_BOUNDS,
     recentSessions,
+    tuningHistory,
+    lifetime: { totalFills: _stats.totalFills, totalProfitCoins: _stats.totalProfit },
     topItemsByFillCancelMargin: topItems,
   }, null, 2);
 
@@ -162,29 +244,32 @@ async function consultAndTune({ masterConfigPath, coflConfigPath } = {}) {
   const parsed = extractJson(reply);
   if (!parsed || !parsed.updates) return { error: "no JSON in reply", raw: reply };
 
-  const applied = {};
-  for (const [key, bounds] of Object.entries(TUNABLE_BOUNDS)) {
-    if (!(key in parsed.updates)) continue;
-    const raw = Number(parsed.updates[key]);
-    if (Number.isNaN(raw)) continue;
-    const safe = clamp(raw, bounds);
-    setAt(masterConfig, key, safe);
-    if (coflConfig && key === "profit.minPercentage") setAt(coflConfig, "thresholds.minPercentage", safe);
-    if (coflConfig && key === "orders.relistAfter") setAt(coflConfig, "thresholds.relistAfter", safe);
-    applied[key] = safe;
+  // Snapshot current values of the keys the model wants to change (for rollback).
+  const before = {};
+  for (const key of Object.keys(TUNABLE_BOUNDS)) {
+    if (key in parsed.updates && key in currentTunables) before[key] = currentTunables[key];
+  }
+
+  const applied = applyUpdates(parsed.updates, masterConfig, coflConfig);
+
+  // Drop no-op "changes" (same value as before) so they don't reset the cooldown.
+  for (const [k, v] of Object.entries(applied)) {
+    if (before[k] === v) { delete applied[k]; delete before[k]; }
   }
 
   if (Object.keys(applied).length) {
-    try {
-      fs.writeFileSync(masterConfigPath + ".tmp", JSON.stringify(masterConfig, null, 2));
-      fs.renameSync(masterConfigPath + ".tmp", masterConfigPath);
-    } catch {}
-    if (coflConfig && coflConfigPath) {
-      try {
-        fs.writeFileSync(coflConfigPath + ".tmp", JSON.stringify(coflConfig, null, 2));
-        fs.renameSync(coflConfigPath + ".tmp", coflConfigPath);
-      } catch {}
-    }
+    writeTunables(masterConfigPath, masterConfig, coflConfigPath, coflConfig);
+    _stats.tuningLog.push({
+      at: new Date().toISOString(),
+      applied,
+      before,
+      reasoning: parsed.reasoning || "",
+      fillsAtChange: _stats.totalFills,
+      profitAtChange: _stats.totalProfit || 0,
+      rolledBack: false,
+    });
+    if (_stats.tuningLog.length > 20) _stats.tuningLog = _stats.tuningLog.slice(-20);
+    saveStats(_stats);
   }
 
   return { applied, reasoning: parsed.reasoning || "" };
@@ -197,9 +282,12 @@ function loadStats() {
     const raw = JSON.parse(fs.readFileSync(STATS_PATH, "utf8"));
     if (!raw.items) raw.items = {};
     if (!raw.sessions) raw.sessions = [];
+    if (!raw.tuningLog) raw.tuningLog = [];
+    if (typeof raw.totalFills !== "number") raw.totalFills = 0;
+    if (typeof raw.totalProfit !== "number") raw.totalProfit = 0;
     return raw;
   } catch {
-    return { items: {}, sessions: [] };
+    return { items: {}, sessions: [], tuningLog: [], totalFills: 0, totalProfit: 0 };
   }
 }
 
@@ -338,8 +426,11 @@ function recordWebhookPayload(payload) {
     const item = ensureItem(tag);
     item.lastSeen = now;
 
+    const session = _stats.sessions[_stats.sessions.length - 1];
     if (event === "filled") {
       item.fills += 1;
+      _stats.totalFills += 1;
+      if (session) session.fills = (session.fills || 0) + 1;
       // Approximate profit: spread captured. We don't know the exact spread here
       // so we track the coins flowing through as a proxy.
       if (pricePerUnit > 0 && amount > 0) {
@@ -348,6 +439,7 @@ function recordWebhookPayload(payload) {
       }
     } else if (event === "cancelled") {
       item.cancels += 1;
+      if (session) session.cancels = (session.cancels || 0) + 1;
     }
     // "placed" is informational — we just update lastSeen (already done above)
   }
@@ -417,6 +509,7 @@ function recordProfit(coins) {
   if (!_stats.sessions.length || !coins) return;
   const current = _stats.sessions[_stats.sessions.length - 1];
   current.profitCoins = (current.profitCoins || 0) + coins;
+  _stats.totalProfit = (_stats.totalProfit || 0) + coins;
   saveStats(_stats);
 }
 
